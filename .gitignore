@@ -16,3 +16,4 @@ tcl8.6.15-src.tar.gz
 # Generated Tcl assets (copied by Gradle from ../src/)
 app/src/main/assets/tcl/state.tcl
 app/src/main/assets/tcl/config.tcl
+app/src/main/assets/tcl/schemes/

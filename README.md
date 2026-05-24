@@ -65,8 +65,6 @@ gradle wrapper --gradle-version=8.9
 # -> app/build/outputs/apk/debug/writhdeck-debug.apk
 ```
 
-See `ANDROID.md` in the `writhdeck` repository for the full architecture documentation.
-
 ---
 
 ## Architecture
