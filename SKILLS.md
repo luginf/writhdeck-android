@@ -1,128 +1,128 @@
-# WrithDeck Android — référence développement
+# WrithDeck Android — developer reference
 
-Pour les patterns côté moteur Tcl (`state.tcl`, `config.tcl`, timer, stats, INI…),
-consulter **`../writhdeck/SKILLS.md`** — ce fichier couvre uniquement la couche Android
+For patterns on the Tcl engine side (`state.tcl`, `config.tcl`, timer, stats, INI...),
+see **`../writhdeck/SKILLS.md`** — this file covers only the Android layer
 (JNI, Kotlin, Compose).
 
 ---
 
-## Architecture Tcl / Kotlin
+## Tcl / Kotlin architecture
 
-| Responsabilité | Couche |
+| Responsibility | Layer |
 |---|---|
-| Persistance `.writhdeck.json` (curseurs, favoris, récents, stats) | Tcl `state.tcl` |
-| Config `writhdeck.ini` (ini-load/save, profils, thèmes, clés) | Tcl `config.tcl` |
-| Timer — état, logique countdown/stopwatch | Tcl `android-timer-*` |
-| Timer — tick toutes les secondes | Kotlin coroutine `delay(1000)` |
-| Comptage de mots en temps réel | Kotlin (contenu mémoire) |
-| Occurrences de mots | Tcl `android-word-occurrences` |
-| Stats journalières | Tcl `android-get-stats` → `daily-update` |
-| Couleurs du thème actif | Tcl `android-get-theme` → Kotlin |
+| `.writhdeck.json` persistence (cursors, favorites, recents, stats) | Tcl `state.tcl` |
+| `writhdeck.ini` config (ini-load/save, profiles, themes, keys) | Tcl `config.tcl` |
+| Timer — state, countdown/stopwatch logic | Tcl `android-timer-*` |
+| Timer — tick every second | Kotlin coroutine `delay(1000)` |
+| Real-time word count | Kotlin (in-memory content) |
+| Word occurrences | Tcl `android-word-occurrences` |
+| Daily stats | Tcl `android-get-stats` -> `daily-update` |
+| Active theme colors | Tcl `android-get-theme` -> Kotlin |
 | TOC (`buildToc`) | Kotlin |
-| UI, navigation, cycle de vie | Kotlin + Jetpack Compose |
+| UI, navigation, lifecycle | Kotlin + Jetpack Compose |
 
 ---
 
-## Bridge JNI
+## JNI bridge
 
-### Ordre d'init (`writhdeck_jni.c`) — critique
+### Init order (`writhdeck_jni.c`) — critical
 
 ```c
-// 1. Créer l'interpréteur
+// 1. Create the interpreter
 interp = Tcl_CreateInterp();
-// 2. tcl_library AVANT Tcl_Init — sinon Tcl cherche /usr/local/lib/tcl8.6 → échec
+// 2. tcl_library BEFORE Tcl_Init — otherwise Tcl looks for /usr/local/lib/tcl8.6 -> failure
 snprintf(lib_path, sizeof(lib_path), "%s/tcl/lib/tcl8.6", dir);
 Tcl_SetVar(interp, "tcl_library", lib_path, TCL_GLOBAL_ONLY);
-// 3. Tcl_Init — loggué mais non fatal si raté
+// 3. Tcl_Init — logged but non-fatal if it fails
 if (Tcl_Init(interp) != TCL_OK) { LOGE("Tcl_Init: %s", ...); }
-// 4. Variable d'environnement pour boot-android.tcl
+// 4. Environment variable for boot-android.tcl
 Tcl_SetVar(interp, "::ANDROID_FILES_DIR", dir, TCL_GLOBAL_ONLY);
 ```
 
-Si `tcl_library` est positionné après `Tcl_Init`, Tcl ne trouve pas `init.tcl`,
-l'interpréteur est inutilisable, `boot-android.tcl` ne tourne pas → ini vide.
+If `tcl_library` is set after `Tcl_Init`, Tcl cannot find `init.tcl`, the interpreter
+is unusable, `boot-android.tcl` never runs -> empty ini file.
 
-### Fonctions exposées
+### Exposed functions
 
-| Fonction JNI | Usage |
+| JNI function | Purpose |
 |---|---|
-| `nativeInit(filesDir)` | Crée l'interpréteur, positionne `tcl_library`, source `boot-android.tcl` |
-| `nativeEval(script)` | Évalue du Tcl, retourne le résultat comme String |
-| `nativeGetVar(varName)` | Lit une variable globale Tcl |
-| `nativeSetVar(varName, value)` | Positionne une variable globale Tcl |
-| `nativeDestroy()` | Détruit l'interpréteur |
+| `nativeInit(filesDir)` | Creates the interpreter, sets `tcl_library`, sources `boot-android.tcl` |
+| `nativeEval(script)` | Evaluates Tcl, returns the result as a String |
+| `nativeGetVar(varName)` | Reads a global Tcl variable |
+| `nativeSetVar(varName, value)` | Sets a global Tcl variable |
+| `nativeDestroy()` | Destroys the interpreter |
 
-Tous les appels JNI se font sur `Dispatchers.IO` (thread-safety Tcl).
+All JNI calls are made on `Dispatchers.IO` (Tcl thread-safety).
 
 ---
 
-## Boot Tcl (`boot-android.tcl`)
+## Tcl boot (`boot-android.tcl`)
 
-### Ordre obligatoire
+### Mandatory order
 
 ```tcl
-# Charger les modules moteur
+# Load engine modules
 foreach _mod {state config} { source ... }
-# Charger les schémas de couleur
+# Load color schemes
 foreach _sf [glob .../schemes/*.tcl] { catch { source $_sf } }
-schemes-init          # ← AVANT ini-load : peuple cfg_schemes pour scheme-apply
-file mkdir $::DOCS_DIR_DEFAULT  # ← AVANT ini-load : sinon ini-save échoue (dossier absent)
-ini-load              # ← appelle scheme-apply si scheme != default
+schemes-init          # <- BEFORE ini-load: populates cfg_schemes for scheme-apply
+file mkdir $::DOCS_DIR_DEFAULT  # <- BEFORE ini-load: otherwise ini-save fails (missing dir)
+ini-load              # <- calls scheme-apply if scheme != default
 keys-init
 state-load
 ```
 
-### Procs Android exposées
+### Exposed Android procs
 
-| Proc | Retour | Usage |
+| Proc | Return | Purpose |
 |---|---|---|
-| `android-timer-start/pause/resume/reset` | `"active remaining"` | Contrôle timer |
-| `android-timer-tick` | `"active remaining"` | Appelée par coroutine Kotlin toutes les secondes |
-| `android-timer-state` | `"active remaining lastTick"` | État initial au démarrage du ViewModel |
-| `android-get-theme` | `"bg fg headingColor"` | Couleurs hex du thème courant |
-| `android-word-occurrences {text}` | `"mot\tcount\n..."` | Fréquence des mots du texte en mémoire |
-| `android-get-stats {filepath words}` | `"date\twords\n..."` | Stats journalières du fichier |
+| `android-timer-start/pause/resume/reset` | `"active remaining"` | Timer control |
+| `android-timer-tick` | `"active remaining"` | Called by Kotlin coroutine every second |
+| `android-timer-state` | `"active remaining lastTick"` | Initial state at ViewModel startup |
+| `android-get-theme` | `"bg fg headingColor"` | Hex colors of the current theme |
+| `android-word-occurrences {text}` | `"word\tcount\n..."` | Word frequency from in-memory text |
+| `android-get-stats {filepath words}` | `"date\twords\n..."` | Daily stats for a file |
 
 ---
 
-## Tâche Gradle `copyTclModules`
+## Gradle `copyTclModules` task
 
-Définie dans `app/build.gradle.kts`, dépendance de `preBuild`.
+Defined in `app/build.gradle.kts`, dependency of `preBuild`.
 
 ```
-../writhdeck/src/state.tcl      → assets/tcl/state.tcl
-../writhdeck/src/config.tcl     → assets/tcl/config.tcl
-../writhdeck/src/schemes/*.tcl  → assets/tcl/schemes/
-tcl8.6.15/library/…            → assets/tcl/lib/tcl8.6/  (commité, pas copié)
+../writhdeck/src/state.tcl      -> assets/tcl/state.tcl
+../writhdeck/src/config.tcl     -> assets/tcl/config.tcl
+../writhdeck/src/schemes/*.tcl  -> assets/tcl/schemes/
+tcl8.6.15/library/...          -> assets/tcl/lib/tcl8.6/  (committed, not copied)
 ```
 
-Le dépôt `writhdeck` doit être cloné à `../writhdeck/` (côte à côte dans le même
-dossier parent). `assets/tcl/lib/tcl8.6/` est commité — la stdlib Tcl est stable
-sur toute la série 8.6.x et n'a pas besoin d'être régénérée.
+The `writhdeck` repository must be cloned at `../writhdeck/` (side by side in the same
+parent folder). `assets/tcl/lib/tcl8.6/` is committed — the Tcl stdlib is stable
+across the entire 8.6.x series and does not need to be regenerated.
 
 ---
 
-## Patterns Kotlin / Compose
+## Kotlin / Compose patterns
 
-### BasicTextField — curseur
+### BasicTextField — cursor
 
 ```kotlin
-// Correct : remember sans clé de contenu
+// Correct: remember without a content key
 var tfv by remember { mutableStateOf(TextFieldValue(content)) }
-// Synchroniser sur ouverture de fichier externe uniquement
+// Sync only on external file open
 LaunchedEffect(content) {
     if (content != tfv.text) tfv = TextFieldValue(content)
 }
 ```
 
-`remember(content) { ... }` réinitialise le curseur à 0 à chaque frappe — ne pas faire.
+`remember(content) { ... }` resets the cursor to 0 on every keystroke — do not use.
 
-### VisualTransformation (coloration titres)
+### VisualTransformation (heading colors)
 
-`HeadingVisualTransformation` colore les lignes de titre sans modifier le texte.
-- `OffsetMapping.Identity` — pas de décalage d'offset
-- `buildAnnotatedString { append(text) }` — conserve les spans existants
-- `remember(headingMarker, markdownHeadings, hdColor)` pour ne pas recalculer à chaque frappe
+`HeadingVisualTransformation` colors heading lines without modifying the text.
+- `OffsetMapping.Identity` — no offset shift
+- `buildAnnotatedString { append(text) }` — preserves existing spans
+- `remember(headingMarker, markdownHeadings, hdColor)` to avoid recomputing on every keystroke
 
 ```kotlin
 visualTransformation = remember(headingMarker, markdownHeadings, hdColor) {
@@ -130,35 +130,35 @@ visualTransformation = remember(headingMarker, markdownHeadings, hdColor) {
 }
 ```
 
-### Couleurs du thème
+### Theme colors
 
-Lire via un seul appel Tcl pour éviter plusieurs eval :
+Read via a single Tcl call to avoid multiple evals:
 ```kotlin
 val raw = engine.eval("android-get-theme")   // "bg fg headingColor"
 val parts = raw.split(Regex("\\s+"))
 ```
 
-Convertir hex → `Color` avec `parseHexColor()` qui gère `Color.Unspecified` sur erreur.
-Appliquer via `remember(themeColors.bg) { parseHexColor(themeColors.bg) }`.
+Convert hex -> `Color` with `parseHexColor()`, which returns `Color.Unspecified` on error.
+Apply via `remember(themeColors.bg) { parseHexColor(themeColors.bg) }`.
 
-### Rechargement config
+### Config reload
 
-Après sauvegarde de `writhdeck.ini` :
+After saving `writhdeck.ini`:
 ```kotlin
 engine.eval("ini-load")
 engine.eval("keys-init")
 _themeColors.value = loadThemeColors()
 _headingMarker.value = engine.getVar("::cfg_heading_marker")
-// ... tous les StateFlows affectés par l'INI
+// ... all StateFlows affected by the INI
 ```
 
 ### TOC (`buildToc`)
 
-Détection des titres par string (startsWith/endsWith + boucle de comptage itératif),
-**pas de regex** — `Regex.escape("=")` produit `\Q=\E` qui ne fonctionne pas comme
-quantificateur en Kotlin/Java.
+Heading detection uses string matching (startsWith/endsWith + iterative count loop),
+**not regex** — `Regex.escape("=")` produces `\Q=\E` which does not work as a
+quantifier in Kotlin/Java.
 
-Guard contre crash sur marqueur seul (ex. `"="`) :
+Guard against crash on a bare marker (e.g. `"="`):
 ```kotlin
 val title = if (end > pos) trimmed.substring(pos, end).trim() else ""
 if (level > 0 && title.isNotEmpty()) entries.add(...)
@@ -169,33 +169,33 @@ if (level > 0 && title.isNotEmpty()) entries.add(...)
 ```kotlin
 var distractionFree by remember { mutableStateOf(false) }
 if (distractionFree) BackHandler { distractionFree = false }
-// Scaffold : topBar et bottomBar conditionnels sur !distractionFree
-// Bouton FullscreenExit en overlay TopEnd dans le Box de l'éditeur
+// Scaffold: topBar and bottomBar conditional on !distractionFree
+// FullscreenExit button as TopEnd overlay inside the editor Box
 ```
 
-`BackHandler` intercepte le geste retour système avant la navigation — sans lui,
-appuyer sur Retour quitte l'éditeur au lieu de sortir du mode.
+`BackHandler` intercepts the system back gesture before navigation — without it,
+pressing Back exits the editor instead of leaving the mode.
 
-### Fichiers externes (intent ACTION_VIEW / ACTION_EDIT)
+### External files (ACTION_VIEW / ACTION_EDIT intents)
 
 ```kotlin
-// MainActivity.kt : lire intent.data au démarrage et onNewIntent
+// MainActivity.kt: read intent.data at startup and in onNewIntent
 vm.openExternalContent(uri, contentResolver, canWrite)
-// Sauvegarde via ContentResolver (pas File I/O direct)
+// Save via ContentResolver (not direct File I/O)
 contentResolver.openOutputStream(uri, "wt")?.use { ... }
 ```
 
 `canWrite` = `intent.action == ACTION_EDIT || checkUriPermission(WRITE)`.
-L'URI est conservé dans `_externalUri` pour les sauvegardes suivantes.
+The URI is stored in `_externalUri` for subsequent saves.
 
 ---
 
-## Timer Android
+## Android timer
 
-Le timer Tcl n'a pas d'event loop → tick Kotlin :
+The Tcl timer has no event loop -> Kotlin tick:
 
 ```kotlin
-// Démarrer
+// Start
 val result = engine.eval("android-timer-start")   // "1 1500"
 // Coroutine tick
 while (true) {
@@ -206,11 +206,11 @@ while (true) {
 }
 ```
 
-`timerLastTick == 0L` → timer jamais démarré ou réinitialisé → masquer dans la barre.
-`timerLastTick != 0L && !timerActive` → en pause → afficher remaining.
+`timerLastTick == 0L` -> timer never started or reset -> hide in status bar.
+`timerLastTick != 0L && !timerActive` -> paused -> show remaining.
 
-Ne **jamais** appeler `timer-start` / `timer-tick` natifs (utilisent `after` → requiert
-event loop Tcl absente sur Android).
+Never call the native `timer-start` / `timer-tick` procs (they use `after`, which
+requires a Tcl event loop absent on Android).
 
 ---
 
@@ -223,43 +223,43 @@ target_include_directories(writhdeck PRIVATE ${TCL_ABI_DIR}/include)
 target_link_libraries(writhdeck ${TCL_ABI_DIR}/lib/libtcl8.6.a android log m)
 ```
 
-ABIs actives : `arm64-v8a` (device) + `x86_64` (émulateur). `armeabi-v7a` désactivé.
+Active ABIs: `arm64-v8a` (device) + `x86_64` (emulator). `armeabi-v7a` disabled.
 
-Cross-compilation Tcl — points critiques NDK r26+ :
-- `clang --target=...` direct (pas les wrappers `${triple}${api}-clang` — échouent sous autoconf)
-- `--sysroot=$TOOLCHAIN/sysroot` dans `CFLAGS` et `LDFLAGS`
-- `--build=$(uname -m)-linux-gnu` pour que autoconf détecte la cross-compilation
-- `-fPIC` requis — `libtcl8.6.a` est linkée dans `libwrithdeck.so` (shared lib)
-
----
-
-## Implémenté
-
-- **JNI bridge** : `nativeInit/Eval/GetVar/SetVar/Destroy`
-- **Boot Tcl** : `boot-android.tcl` avec ordre correct (`schemes-init` avant `ini-load`)
-- **Navigateur de fichiers** : liste `.txt`/`.md`/`.ini` dans Documents/WrithDeck/
-- **Éditeur** : `BasicTextField` monospace, `VisualTransformation` pour les titres
-- **TOC** : `buildToc` (WrithDeck `= heading =` + markdown `# heading`)
-- **Mode commande** : `ModalBottomSheet` avec timer, stats, occurrences, TOC, heading
-- **Heading toggle** : `applyHeading(tfv, marker)` — bascule les marqueurs sur la sélection
-- **Mode distraction-free** : Scaffold conditionnel + `BackHandler`
-- **Timer** : coroutine Kotlin + procs `android-timer-*`
-- **Stats journalières** : `android-get-stats` → dialog `AlertDialog`
-- **Occurrences de mots** : `android-word-occurrences` → dialog scrollable
-- **Thèmes de couleur** : `android-get-theme` → `parseHexColor` → `background`/`color`
-- **Édition writhdeck.ini** : bouton engrenage → `openIniFile()` → `reloadConfig()`
-- **Fichiers externes** : intent `ACTION_VIEW`/`ACTION_EDIT` + sauvegarde via ContentResolver
-- **Backup** : `android-backup {path}` → `documents/backups/`
+Tcl cross-compilation — NDK r26+ critical points:
+- `clang --target=...` directly (not `${triple}${api}-clang` wrappers — fail under autoconf)
+- `--sysroot=$TOOLCHAIN/sysroot` in both `CFLAGS` and `LDFLAGS`
+- `--build=$(uname -m)-linux-gnu` so autoconf correctly detects cross-compilation
+- `-fPIC` required — `libtcl8.6.a` is linked into `libwrithdeck.so` (shared lib)
 
 ---
 
-## Idées non encore implémentées
+## Implemented
 
-- Sélecteur de profil / thème dans l'UI (actuellement via édition de l'INI)
-- Scratchpad intégré (WS2 Android)
-- Support des fichiers `.md` avec preview basique
-- Recherche dans le texte (Ctrl+F)
-- Partage de fichier (intent `ACTION_SEND`)
-- Synchronisation avec un dépôt git (SSH ou HTTP)
-- Widget de comptage de mots pour l'écran d'accueil
-- Police personnalisée (import TTF)
+- **JNI bridge**: `nativeInit/Eval/GetVar/SetVar/Destroy`
+- **Tcl boot**: `boot-android.tcl` with correct order (`schemes-init` before `ini-load`)
+- **File browser**: lists `.txt`/`.md`/`.ini` in Documents/WrithDeck/
+- **Editor**: monospace `BasicTextField`, `VisualTransformation` for headings
+- **TOC**: `buildToc` (WrithDeck `= heading =` + markdown `# heading`)
+- **Command mode**: `ModalBottomSheet` with timer, stats, occurrences, TOC, heading
+- **Heading toggle**: `applyHeading(tfv, marker)` — toggles markers on the selection
+- **Distraction-free mode**: conditional Scaffold + `BackHandler`
+- **Timer**: Kotlin coroutine + `android-timer-*` procs
+- **Daily stats**: `android-get-stats` -> `AlertDialog`
+- **Word occurrences**: `android-word-occurrences` -> scrollable dialog
+- **Color themes**: `android-get-theme` -> `parseHexColor` -> `background`/`color`
+- **writhdeck.ini editing**: gear button -> `openIniFile()` -> `reloadConfig()`
+- **External files**: `ACTION_VIEW`/`ACTION_EDIT` intents + save via ContentResolver
+- **Backup**: `android-backup {path}` -> `documents/backups/`
+
+---
+
+## Ideas not yet implemented
+
+- Profile / theme selector in the UI (currently via INI editing)
+- Built-in scratchpad (WS2 Android)
+- `.md` file support with basic preview
+- In-text search (Ctrl+F equivalent)
+- File sharing (ACTION_SEND intent)
+- Git repository sync (SSH or HTTP)
+- Word count home screen widget
+- Custom font import (TTF)

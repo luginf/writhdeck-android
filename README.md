@@ -1,92 +1,92 @@
 # WrithDeck Android
 
-Application Android pour [WrithDeck](https://github.com/luginf/writhdeck) — éditeur de texte sans distraction pour écrivains.
+Android app for [WrithDeck](https://github.com/luginf/writhdeck) — a distraction-free text editor for writers.
 
-Le moteur Tcl de WrithDeck tourne tel quel sur Android via un bridge JNI, assurant une parité complète de la persistance, de la configuration et des statistiques avec les versions desktop/TUI.
-
----
-
-## Fonctionnalités
-
-- Navigateur de fichiers (dossier Documents/WrithDeck/)
-- Éditeur plein texte avec coloration syntaxique des titres
-- Table des matières (TOC)
-- Mode sans distraction (plein écran)
-- Timer compte à rebours / chronomètre
-- Statistiques d'écriture journalières
-- Occurrences de mots
-- Thèmes de couleur (alt01, alt02, gruvbox, nord, solarized, everforest, retro…)
-- Édition du fichier `writhdeck.ini` directement dans l'app
-- Ouverture de fichiers `.txt` depuis un gestionnaire de fichiers externe
-- Config partagée avec les versions desktop via `writhdeck.ini`
+The WrithDeck Tcl engine runs as-is on Android via a JNI bridge, providing full parity for persistence, configuration and writing statistics with the desktop/TUI versions.
 
 ---
 
-## Prérequis
+## Features
 
-- Android Studio (Ladybug ou plus récent)
-- NDK installé via SDK Manager (r25c+)
+- File browser (Documents/WrithDeck/ folder)
+- Full-screen text editor with heading syntax highlighting
+- Table of contents (TOC)
+- Distraction-free mode (fullscreen)
+- Countdown timer / stopwatch
+- Daily writing statistics
+- Word frequency analysis
+- Color themes (alt01, alt02, gruvbox, nord, solarized, everforest, retro...)
+- Edit `writhdeck.ini` directly inside the app
+- Open `.txt` files from an external file manager
+- Config shared with desktop versions via `writhdeck.ini`
+
+---
+
+## Requirements
+
+- Android Studio (Ladybug or newer)
+- NDK installed via SDK Manager (r25c+)
 - CMake 3.22+
-- Sources Tcl 8.6.15 (pour compiler `libtcl8.6.a`)
-- Dépôt [writhdeck](https://github.com/luginf/writhdeck) cloné **à côté** de ce dépôt
+- Tcl 8.6.15 sources (to compile `libtcl8.6.a`)
+- [writhdeck](https://github.com/luginf/writhdeck) repository cloned **alongside** this one
 
-Structure attendue :
+Expected layout:
 ```
 parent/
-  writhdeck/          ← dépôt principal (Tcl/Tk)
-  writhdeck-android/  ← ce dépôt
+  writhdeck/          <- main repository (Tcl/Tk)
+  writhdeck-android/  <- this repository
 ```
 
-La tâche Gradle `copyTclModules` lit `../writhdeck/src/` pour synchroniser `state.tcl`,
-`config.tcl` et les schémas de couleur à chaque build.
+The Gradle task `copyTclModules` reads `../writhdeck/src/` to sync `state.tcl`,
+`config.tcl` and color schemes on every build.
 
 ---
 
-## Build depuis zéro
+## Build from scratch
 
 ```sh
 cd writhdeck-android/
 
-# 1. Télécharger et décompresser les sources Tcl
+# 1. Download and extract Tcl sources
 wget https://prdownloads.sourceforge.net/tcl/tcl8.6.15-src.tar.gz
 tar xzf tcl8.6.15-src.tar.gz
 
-# 2. Compiler libtcl8.6.a pour chaque ABI
-./tools/build-tcl-android.sh arm64-v8a   # device physique
-./tools/build-tcl-android.sh x86_64      # émulateur
+# 2. Compile libtcl8.6.a for each ABI
+./tools/build-tcl-android.sh arm64-v8a   # physical device
+./tools/build-tcl-android.sh x86_64      # emulator
 
-# 3. gradle-wrapper.jar (si absent)
+# 3. gradle-wrapper.jar (if missing)
 gradle wrapper --gradle-version=8.9
-# ou : wget https://github.com/gradle/gradle/raw/v8.9.0/gradle/wrapper/gradle-wrapper.jar \
-#           -O gradle/wrapper/gradle-wrapper.jar
+# or: wget https://github.com/gradle/gradle/raw/v8.9.0/gradle/wrapper/gradle-wrapper.jar \
+#          -O gradle/wrapper/gradle-wrapper.jar
 
 # 4. Build
 ./gradlew assembleDebug
-# → app/build/outputs/apk/debug/writhdeck-debug.apk
+# -> app/build/outputs/apk/debug/writhdeck-debug.apk
 ```
 
-Voir `ANDROID.md` dans le dépôt `writhdeck` pour la documentation complète de l'architecture.
+See `ANDROID.md` in the `writhdeck` repository for the full architecture documentation.
 
 ---
 
 ## Architecture
 
 ```
-UI Kotlin + Jetpack Compose
-        ↕
+Kotlin + Jetpack Compose UI
+        |
 WrithdeckEngine.kt  (JNI wrapper)
-        ↕
-writhdeck_jni.c  (bridge C)
-        ↕
-libtcl8.6.a  (Tcl 8.6 statique, NDK)
-        ↕
+        |
+writhdeck_jni.c  (C bridge)
+        |
+libtcl8.6.a  (static Tcl 8.6, NDK)
+        |
 boot-android.tcl + state.tcl + config.tcl
 ```
 
-| Côté Tcl | Côté Kotlin |
+| Tcl side | Kotlin side |
 |---|---|
-| Persistance `.writhdeck.json` | UI, navigation, cycle de vie |
-| Config `writhdeck.ini` | Comptage de mots en mémoire |
-| Timer (état + logique) | Tick timer (coroutine `delay(1000)`) |
-| Occurrences de mots | TOC (`buildToc`) |
-| Stats journalières | Rendu Compose |
+| `.writhdeck.json` persistence | UI, navigation, lifecycle |
+| `writhdeck.ini` config | In-memory word count |
+| Timer (state + logic) | Timer tick (coroutine `delay(1000)`) |
+| Word occurrences | TOC (`buildToc`) |
+| Daily stats | Compose rendering |
