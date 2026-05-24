@@ -21,6 +21,7 @@ import java.io.File
 
 data class DocEntry(val name: String, val path: String)
 data class StatEntry(val date: String, val words: Int)
+data class StatusBar(val left: String = "", val center: String = "", val right: String = "")
 data class ThemeColors(
     val bg: String = "#1a1a1a",
     val fg: String = "#d4cfbf",
@@ -72,12 +73,19 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     val markdownHeadings = _markdownHeadings.asStateFlow()
     private val _keyToc = MutableStateFlow("F11")
     val keyToc = _keyToc.asStateFlow()
+    private val _marginWidth = MutableStateFlow(60)
+    val marginWidth = _marginWidth.asStateFlow()
+    private val _marginHeight = MutableStateFlow(40)
+    val marginHeight = _marginHeight.asStateFlow()
 
     private val _timerType = MutableStateFlow("countdown")
     val timerType = _timerType.asStateFlow()
 
     private val _themeColors = MutableStateFlow(ThemeColors())
     val themeColors = _themeColors.asStateFlow()
+
+    private val _statusBar = MutableStateFlow(StatusBar())
+    val statusBar = _statusBar.asStateFlow()
     private val _timerActive = MutableStateFlow(false)
     val timerActive = _timerActive.asStateFlow()
     private val _timerRemaining = MutableStateFlow(0)
@@ -105,11 +113,14 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _markdownHeadings.value = engine.eval("set ::cfg_markdown_headings").trim() != "0"
         _keyToc.value = engine.eval("set ::cfg_key_toc").trim().ifEmpty { "F11" }
         _timerType.value = engine.eval("set ::cfg_timer_type").trim().ifEmpty { "countdown" }
+        _marginWidth.value = engine.eval("set ::cfg_margin_width").trim().toIntOrNull() ?: 60
+        _marginHeight.value = engine.eval("set ::cfg_margin_height").trim().toIntOrNull() ?: 40
         applyTimerState(engine.eval("android-timer-state"), resetLastTick = true)
         _themeColors.value = loadThemeColors()
         refreshDocs()
         refreshFavorites()
         refreshRecents()
+        refreshStatus()
     }
 
     // Called from onResume / permission result in MainActivity
@@ -178,6 +189,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 engine.eval("recent-push {${entry.path}}")
                 refreshRecents()
             }
+            refreshStatus()
         }
     }
 
@@ -195,6 +207,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             _currentFile.value = DocEntry("writhdeck.ini", iniFile.absolutePath)
             _dirty.value = false
             _wordCount.value = countWords(text)
+            refreshStatus()
         }
     }
 
@@ -221,6 +234,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _content.value = text
         _dirty.value = true
         _wordCount.value = countWords(text)
+        refreshStatus()
     }
 
     fun createFile(name: String) {
@@ -352,6 +366,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                     if (entry.name == "writhdeck.ini") reloadConfig()
                 }
             }
+            refreshStatus()
         }
     }
 
@@ -361,7 +376,30 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _markdownHeadings.value = engine.eval("set ::cfg_markdown_headings").trim() != "0"
         _keyToc.value = engine.eval("set ::cfg_key_toc").trim().ifEmpty { "F11" }
         _timerType.value = engine.eval("set ::cfg_timer_type").trim().ifEmpty { "countdown" }
+        _marginWidth.value = engine.eval("set ::cfg_margin_width").trim().toIntOrNull() ?: 60
+        _marginHeight.value = engine.eval("set ::cfg_margin_height").trim().toIntOrNull() ?: 40
         _themeColors.value = loadThemeColors()
+        refreshStatus()
+    }
+
+    private fun refreshStatus() {
+        if (!_engineReady.value) return
+        viewModelScope.launch {
+            val filepath = _currentFile.value?.path ?: ""
+            val dirty = if (_dirty.value) "1" else "0"
+            val raw = withContext(Dispatchers.Default) {
+                engine.setVar("::_asb_fn", filepath)
+                // Use catch so a missing proc (boot failure) doesn't surface as an error string
+                engine.eval("catch {android-status-build ${_wordCount.value} \$::_asb_fn $dirty} _sb_r; set _sb_r")
+            }
+            if (!raw.contains('\n')) return@launch  // error result has no newlines
+            val parts = raw.split("\n", limit = 3)
+            _statusBar.value = StatusBar(
+                left   = parts.getOrElse(0) { "" },
+                center = parts.getOrElse(1) { "" },
+                right  = parts.getOrElse(2) { "" }
+            )
+        }
     }
 
     private suspend fun loadThemeColors(): ThemeColors {
@@ -398,6 +436,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 _timerRemaining.value = remaining
                 _timerActive.value = active
                 _timerLastTick.value = System.currentTimeMillis()
+                refreshStatus()
                 if (!active) break
             }
         }

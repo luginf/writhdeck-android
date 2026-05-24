@@ -1,5 +1,7 @@
 package com.writhdeck.app.ui
 
+import android.app.Activity
+import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -17,6 +19,7 @@ import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Title
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -33,8 +36,13 @@ import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.writhdeck.app.StatEntry
 import com.writhdeck.app.WrithdeckViewModel
@@ -187,6 +195,8 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     val headingMarker by vm.headingMarker.collectAsStateWithLifecycle()
     val markdownHeadings by vm.markdownHeadings.collectAsStateWithLifecycle()
     val keyToc by vm.keyToc.collectAsStateWithLifecycle()
+    val marginWidth by vm.marginWidth.collectAsStateWithLifecycle()
+    val marginHeight by vm.marginHeight.collectAsStateWithLifecycle()
     val tocAndroidKey = remember(keyToc) { tkKeyToAndroid(keyToc) }
 
     // Timer
@@ -196,6 +206,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     val timerType by vm.timerType.collectAsStateWithLifecycle()
 
     val themeColors by vm.themeColors.collectAsStateWithLifecycle()
+    val statusBar by vm.statusBar.collectAsStateWithLifecycle()
     val bgColor  = remember(themeColors.bg)           { parseHexColor(themeColors.bg) }
     val fgColor  = remember(themeColors.fg)           { parseHexColor(themeColors.fg) }
     val hdColor  = remember(themeColors.headingColor) { parseHexColor(themeColors.headingColor) }
@@ -208,8 +219,30 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
         if (content != tfv.text) tfv = TextFieldValue(content)
     }
 
-    var distractionFree by remember { mutableStateOf(false) }
+    var distractionFree by rememberSaveable { mutableStateOf(false) }
     if (distractionFree) BackHandler { distractionFree = false }
+
+    val context = LocalContext.current
+    DisposableEffect(distractionFree) {
+        var ctx = context
+        while (ctx is ContextWrapper && ctx !is Activity) ctx = ctx.baseContext
+        val activity = ctx as? Activity
+        val controller = activity?.window?.let {
+            WindowCompat.getInsetsController(it, it.decorView)
+        }
+        if (controller != null) {
+            if (distractionFree) {
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            } else {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
 
     var showToc by remember { mutableStateOf(false) }
     val toc = remember(content, headingMarker, markdownHeadings) {
@@ -269,25 +302,31 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 8.dp)
-                        .navigationBarsPadding(),
+                        .navigationBarsPadding()
+                        .clickable { showCmdMode = true },
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "$wordCount words",
+                        text = statusBar.left,
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall,
                         color = colorScheme.onSurfaceVariant
                     )
-                    if (timerActive || timerLastTick != 0L) {
+                    if (statusBar.center.isNotEmpty()) {
                         Text(
-                            text = formatTimer(timerRemaining, timerActive, timerLastTick, timerType),
+                            text = statusBar.center,
                             fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (timerActive) colorScheme.primary else colorScheme.onSurfaceVariant,
-                            modifier = Modifier.clickable { showCmdMode = true }
+                            color = colorScheme.onSurfaceVariant
                         )
                     }
+                    Text(
+                        text = statusBar.right,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (timerActive) colorScheme.primary else colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
@@ -318,7 +357,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 },
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 20.dp, vertical = 12.dp)
+                    .padding(horizontal = marginWidth.dp, vertical = marginHeight.dp)
                     .imePadding()
                     .onKeyEvent { event ->
                         if (event.type != KeyEventType.KeyDown) return@onKeyEvent false

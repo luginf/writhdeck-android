@@ -38,8 +38,8 @@ class WrithdeckEngine(private val context: Context) {
                 nativeSetVar("::ANDROID_DOCS_DIR", docsDir)
                 val boot = File(context.filesDir, "tcl/boot-android.tcl").absolutePath
                 val result = nativeEval("source {$boot}")
-                if (result.startsWith("ERROR:") || result.contains("not found")) {
-                    android.util.Log.e("WrithdeckEngine", "boot error: $result")
+                if (result.isNotEmpty()) {
+                    android.util.Log.e("WrithdeckEngine", "boot-android.tcl error: $result")
                 }
             }
             ok

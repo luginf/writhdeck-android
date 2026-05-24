@@ -62,9 +62,7 @@ fun BrowserScreen(
 
     val favPaths by remember { derivedStateOf { favoriteDocs.map { it.path }.toSet() } }
     val recentOnly by remember {
-        derivedStateOf {
-            recentDocs.filter { r -> docs.none { d -> d.path == r.path } && r.path !in favPaths }
-        }
+        derivedStateOf { recentDocs.filter { r -> r.path !in favPaths } }
     }
 
     Scaffold(
@@ -130,7 +128,8 @@ fun BrowserScreen(
                             entry = entry,
                             isFavorite = true,
                             onClick = { onOpenFile(entry) },
-                            onLongClick = { contextEntry = entry; showContextMenu = true }
+                            onLongClick = { contextEntry = entry; showContextMenu = true },
+                            onToggleFavorite = { vm.toggleFavorite(entry) }
                         )
                     }
                 }
@@ -159,7 +158,8 @@ fun BrowserScreen(
                             entry = entry,
                             isFavorite = entry.path in favPaths,
                             onClick = { onOpenFile(entry) },
-                            onLongClick = { contextEntry = entry; showContextMenu = true }
+                            onLongClick = { contextEntry = entry; showContextMenu = true },
+                            onToggleFavorite = { vm.toggleFavorite(entry) }
                         )
                     }
                 }
@@ -170,9 +170,10 @@ fun BrowserScreen(
                     items(recentOnly, key = { "recent_${it.path}" }) { entry ->
                         DocListItem(
                             entry = entry,
-                            isFavorite = false,
+                            isFavorite = entry.path in favPaths,
                             onClick = { onOpenFile(entry) },
-                            onLongClick = { contextEntry = entry; showContextMenu = true }
+                            onLongClick = { contextEntry = entry; showContextMenu = true },
+                            onToggleFavorite = { vm.toggleFavorite(entry) }
                         )
                     }
                 }
@@ -383,20 +384,22 @@ private fun DocListItem(
     entry: DocEntry,
     isFavorite: Boolean,
     onClick: () -> Unit,
-    onLongClick: () -> Unit
+    onLongClick: () -> Unit,
+    onToggleFavorite: () -> Unit
 ) {
     ListItem(
         headlineContent = { Text(entry.name, fontFamily = FontFamily.Monospace) },
-        trailingContent = if (isFavorite) {
-            {
+        trailingContent = {
+            IconButton(onClick = onToggleFavorite, modifier = Modifier.size(36.dp)) {
                 Icon(
                     Icons.Default.Star,
-                    contentDescription = "Favorite",
-                    tint = MaterialTheme.colorScheme.primary,
+                    contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
+                    tint = if (isFavorite) MaterialTheme.colorScheme.primary
+                           else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
                     modifier = Modifier.size(18.dp)
                 )
             }
-        } else null,
+        },
         modifier = Modifier.combinedClickable(
             onClick = onClick,
             onLongClick = onLongClick

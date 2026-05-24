@@ -143,6 +143,63 @@ proc android-word-occurrences {text} {
     return $out
 }
 
+# ── Status bar (mirrors status-build from common.tcl) ────────────────────────
+
+proc _android_status_tok {tok words filename dirty timer_val clk} {
+    switch -- $tok {
+        workspace { return "" }
+        filename  { return [expr {$filename eq "" ? "new" : [file tail $filename]}] }
+        dirty     { if {$dirty} { return " \[+\]" }; return "" }
+        sel       { return "" }
+        ln        { return "" }
+        col       { return "" }
+        words     { return "  ${words}w" }
+        chars     { return "" }
+        goal      {
+            if {$::cfg_word_goal > 0} {
+                return [format "  %d/%d" $words $::cfg_word_goal]
+            }
+            return ""
+        }
+        clock     { return "  $clk" }
+        timer     {
+            if {$::cfg_chrono_show} {
+                set _m [expr {$timer_val / 60}]
+                set _s [expr {$timer_val % 60}]
+                if {$::timer_active} {
+                    return [format " \[%d'%02d\"\]" $_m $_s]
+                } else {
+                    return [format "  %d'%02d\"" $_m $_s]
+                }
+            }
+            return ""
+        }
+        space    { return " " }
+        help_bar { return "" }
+        default  { return " $tok" }
+    }
+}
+
+proc android-status-build {words filename dirty} {
+    set timer_val [expr {
+        $::timer_active || $::timer_last_tick != 0
+            ? $::timer_remaining
+            : ($::cfg_timer_type eq "stopwatch" ? 0 : $::cfg_timer_duration * 60)
+    }]
+    set clk [clock format [clock seconds] -format "%H:%M"]
+    set left ""; set center ""; set right ""
+    foreach tok $::cfg_status_left {
+        append left [_android_status_tok $tok $words $filename $dirty $timer_val $clk]
+    }
+    foreach tok $::cfg_status_center {
+        append center [_android_status_tok $tok $words $filename $dirty $timer_val $clk]
+    }
+    foreach tok $::cfg_status_right {
+        append right [_android_status_tok $tok $words $filename $dirty $timer_val $clk]
+    }
+    return "$left\n$center\n$right"
+}
+
 # ── Stats journalières ─────────────────────────────────────────────────────────
 
 # Returns stats for filepath as newline-separated "date\twords" lines, newest first
