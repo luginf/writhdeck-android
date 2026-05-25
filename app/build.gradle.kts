@@ -4,32 +4,6 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// Copy Tcl engine modules from the parent src/ directory into assets at build time.
-// boot-android.tcl stays in assets/tcl/ and is committed; state.tcl + config.tcl
-// are generated from the parent source tree so they stay in sync automatically.
-val writhdeckSrc = "${rootProject.rootDir.parent}/writhdeck/src"
-
-val copyTclModules = tasks.register<Copy>("copyTclModules") {
-    // WrithDeck engine modules from sibling writhdeck/src/
-    from(writhdeckSrc) {
-        include("state.tcl", "config.tcl")
-    }
-    // Color scheme definitions — needed so ini-save produces a complete ini with all scheme colors
-    from("$writhdeckSrc/schemes") {
-        include("*.tcl")
-        into("schemes")
-    }
-    // Tcl stdlib — Tcl_Init() needs init.tcl / clock.tcl at runtime on Android.
-    // Source: tcl8.6.15/library/ (created by build-tcl-android.sh download step).
-    from("${rootProject.rootDir}/tcl8.6.15/library") {
-        include("init.tcl", "auto.tcl", "clock.tcl", "tclIndex",
-                "package.tcl", "word.tcl", "safe.tcl", "parray.tcl", "history.tcl")
-        into("lib/tcl8.6")
-    }
-    into("src/main/assets/tcl")
-}
-tasks.named("preBuild") { dependsOn(copyTclModules) }
-
 android {
     namespace = "com.writhdeck.app"
     compileSdk = 35
@@ -40,14 +14,6 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
-
-        externalNativeBuild {
-            cmake { arguments("-DANDROID_STL=none") }
-        }
-        ndk {
-            // Phase 1: arm64-v8a (device) + x86_64 (emulator)
-            abiFilters += listOf("arm64-v8a", "x86_64")
-        }
     }
 
     buildTypes {
@@ -73,10 +39,6 @@ android {
     kotlinOptions { jvmTarget = "17" }
 
     buildFeatures { compose = true }
-
-    externalNativeBuild {
-        cmake { path("src/main/cpp/CMakeLists.txt") }
-    }
 }
 
 dependencies {

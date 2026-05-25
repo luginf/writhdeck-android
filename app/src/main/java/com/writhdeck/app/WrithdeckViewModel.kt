@@ -20,19 +20,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class DocEntry(val name: String, val path: String)
 data class StatEntry(val date: String, val words: Int)
 data class StatusBar(val left: String = "", val center: String = "", val right: String = "")
-data class ThemeColors(
-    val bg: String = "#1a1a1a",
-    val fg: String = "#e8e8e8",
-    val headingColor: String = "#c8a060"
-)
 
 class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
-
-    private val engine = WrithdeckEngine(app)
 
     private val externalDocsDir = File(
         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "writhdeck"
@@ -44,6 +40,10 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     private val docsDir: File get() =
         if (_storagePermissionGranted.value) externalDocsDir else internalDocsDir
+
+    private var config = AppConfig()
+    private var appState = AppState()
+    private lateinit var stateFile: File
 
     private val _engineReady = MutableStateFlow(false)
     val engineReady = _engineReady.asStateFlow()
@@ -75,9 +75,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     val markdownHeadings = _markdownHeadings.asStateFlow()
     private val _keyToc = MutableStateFlow("F11")
     val keyToc = _keyToc.asStateFlow()
-    private val _marginWidth = MutableStateFlow(60)
+    private val _marginWidth = MutableStateFlow(16)
     val marginWidth = _marginWidth.asStateFlow()
-    private val _marginHeight = MutableStateFlow(40)
+    private val _marginHeight = MutableStateFlow(16)
     val marginHeight = _marginHeight.asStateFlow()
 
     private val _timerType = MutableStateFlow("countdown")
@@ -99,7 +99,6 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     val timerLastTick = _timerLastTick.asStateFlow()
 
     private var timerJob: Job? = null
-
     private var externalUri: Uri? = null
     private var externalWritable = false
 
@@ -107,32 +106,48 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     val snackbarMessage = _snackbarMessage.asStateFlow()
 
     init {
-        viewModelScope.launch { initEngine() }
+        viewModelScope.launch { initApp() }
     }
 
-    private suspend fun initEngine() {
+    private suspend fun initApp() {
         val dd = docsDir.also { it.mkdirs() }
-        engine.init(dd.absolutePath)
+        stateFile = File(dd, ".writhdeck.json")
+
+        config = withContext(Dispatchers.IO) {
+            val iniFile = File(dd, "writhdeck.ini")
+            if (iniFile.exists()) IniParser.parse(iniFile.readText()) else AppConfig()
+        }
+        appState = withContext(Dispatchers.IO) { StateStore.load(stateFile) }
+
+        applyConfig()
+        _timerRemaining.value = if (config.timerType == "stopwatch") 0 else config.timerDurationSecs()
+        _timerLastTick.value = 0L
+        _timerActive.value = false
+
         _engineReady.value = true
-        fun String.singleWord() = trim().takeIf { it.isNotBlank() && !it.contains(' ') }
-        _headingMarker.value = engine.eval("set ::cfg_heading_marker").singleWord() ?: "="
-        _markdownHeadings.value = engine.eval("set ::cfg_markdown_headings").trim().let { it == "1" || it == "yes" || it == "true" }
-        _keyToc.value = engine.eval("set ::cfg_key_toc").singleWord() ?: "F11"
-        _timerType.value = engine.eval("set ::cfg_timer_type").trim().let { if (it == "stopwatch") "stopwatch" else "countdown" }
-        // Cap margins: desktop uses pixels, Android uses dp — clamp to usable phone dimensions
-        _marginWidth.value = (engine.eval("set ::cfg_margin_width").trim().toIntOrNull() ?: 16).coerceIn(0, 48)
-        _marginHeight.value = (engine.eval("set ::cfg_margin_height").trim().toIntOrNull() ?: 16).coerceIn(0, 32)
-        applyTimerState(engine.eval("android-timer-state"), resetLastTick = true)
-        _darkModePreference.value = engine.eval("set ::cfg_android_dark_mode").trim()
-            .let { if (it == "auto" || it == "yes" || it == "no") it else "auto" }
-        _themeColors.value = loadThemeColors()
         refreshDocs()
         refreshFavorites()
         refreshRecents()
         refreshStatus()
     }
 
-    // Called from onResume / permission result in MainActivity
+    private fun applyConfig() {
+        _headingMarker.value = config.headingMarker
+        _markdownHeadings.value = config.markdownHeadings
+        _keyToc.value = config.keyToc
+        _timerType.value = config.timerType
+        _marginWidth.value = config.marginWidth
+        _marginHeight.value = config.marginHeight
+        _darkModePreference.value = config.androidDarkMode
+        _themeColors.value = config.themeColors(resolveUseDark())
+    }
+
+    private fun resolveUseDark(): Boolean = when (config.androidDarkMode) {
+        "yes" -> true
+        "no"  -> false
+        else  -> isSystemDarkMode()
+    }
+
     fun onStoragePermissionGranted() {
         if (_storagePermissionGranted.value) return
         _storagePermissionGranted.value = true
@@ -148,8 +163,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             }
             _engineReady.value = false
             timerJob?.cancel(); timerJob = null
-            withContext(Dispatchers.IO) { engine.destroy() }
-            initEngine()
+            initApp()
             _snackbarMessage.value = "Documents stored in Documents/writhdeck/"
         }
     }
@@ -171,46 +185,34 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refreshFavorites() {
-        viewModelScope.launch {
-            if (!_engineReady.value) return@launch
-            val raw = withContext(Dispatchers.Default) {
-                engine.eval("join \$::favorites_list \"\n\"")
-            }
-            val entries = raw.lines()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .mapNotNull { path ->
-                    val f = File(path)
-                    if (f.exists()) DocEntry(f.name, f.absolutePath) else null
-                }
-            _favoriteDocs.value = entries
+        _favoriteDocs.value = appState.favorites.mapNotNull { path ->
+            val f = File(path)
+            if (f.exists()) DocEntry(f.name, f.absolutePath) else null
         }
     }
 
     fun setDarkModePreference(pref: String) {
-        viewModelScope.launch {
-            if (!_engineReady.value) return@launch
-            val useDark = when (pref) {
-                "yes" -> true
-                "no"  -> false
-                else  -> isSystemDarkMode()
+        config = config.copy(androidDarkMode = pref)
+        _darkModePreference.value = pref
+        _themeColors.value = config.themeColors(resolveUseDark())
+        viewModelScope.launch(Dispatchers.IO) {
+            val iniFile = File(docsDir, "writhdeck.ini")
+            if (iniFile.exists()) {
+                iniFile.writeText(IniParser.patchKeys(iniFile.readText(), "android_dark_mode" to pref))
+            } else {
+                iniFile.writeText(IniParser.write(config))
             }
-            // Write dark_mode + android_dark_mode to INI so they persist across restarts
-            engine.eval("""
-                set ::cfg_dark_mode ${if (useDark) 1 else 0}
-                set ::cfg_android_dark_mode $pref
-                ini-save
-            """.trimIndent())
-            val colors = loadThemeColors(pref = pref)
-            _darkModePreference.value = pref
-            _themeColors.value = colors
         }
     }
 
     fun updateThemeColors(systemDark: Boolean) {
-        viewModelScope.launch {
-            _themeColors.value = loadThemeColors(systemDark = systemDark, pref = _darkModePreference.value)
-        }
+        _themeColors.value = config.themeColors(
+            when (config.androidDarkMode) {
+                "yes" -> true
+                "no"  -> false
+                else  -> systemDark
+            }
+        )
     }
 
     fun openFile(entry: DocEntry) {
@@ -221,11 +223,12 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             _content.value = text
             _currentFile.value = entry
             _dirty.value = false
-            _wordCount.value = countWords(text)
-            if (_engineReady.value) {
-                engine.eval("recent-push {${entry.path}}")
-                refreshRecents()
-            }
+            val wc = countWords(text)
+            _wordCount.value = wc
+            appState = StateStore.pushRecent(appState, entry.path)
+            appState = StateStore.updateDaily(appState, entry.path, wc, today())
+            withContext(Dispatchers.IO) { StateStore.save(stateFile, appState) }
+            refreshRecents()
             refreshStatus()
         }
     }
@@ -233,15 +236,18 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     fun openIniFile() {
         viewModelScope.launch {
             val iniFile = File(docsDir, "writhdeck.ini")
-            if (_engineReady.value) {
-                docsDir.mkdirs()
-                engine.eval("ini-save")
+            docsDir.mkdirs()
+            val text = withContext(Dispatchers.IO) {
+                if (!iniFile.exists()) {
+                    val written = IniParser.write(config)
+                    iniFile.writeText(written)
+                    written
+                } else {
+                    iniFile.readText()
+                }
             }
             externalUri = null
             externalWritable = false
-            val text = withContext(Dispatchers.IO) {
-                if (iniFile.exists()) iniFile.readText() else ""
-            }
             _content.value = text
             _currentFile.value = DocEntry("writhdeck.ini", iniFile.absolutePath)
             _dirty.value = false
@@ -251,28 +257,24 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun refreshRecents() {
-        viewModelScope.launch {
-            if (!_engineReady.value) return@launch
-            val raw = withContext(Dispatchers.Default) {
-                engine.eval("join \$::recent_list \"\n\"")
+        _recentDocs.value = appState.recent
+            .mapNotNull { path ->
+                val f = File(path)
+                if (f.exists() && f.canRead()) DocEntry(f.name, f.absolutePath) else null
             }
-            val entries = raw.lines()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .mapNotNull { path ->
-                    val f = File(path)
-                    if (f.exists() && f.canRead()) DocEntry(f.name, f.absolutePath) else null
-                }
-                .take(10)
-            _recentDocs.value = entries
-        }
+            .take(10)
     }
 
     fun updateContent(text: String) {
         if (text == _content.value) return
         _content.value = text
         _dirty.value = true
-        _wordCount.value = countWords(text)
+        val wc = countWords(text)
+        _wordCount.value = wc
+        val path = _currentFile.value?.path
+        if (path != null) {
+            appState = StateStore.updateDaily(appState, path, wc, today())
+        }
         refreshStatus()
     }
 
@@ -286,29 +288,17 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun renameFile(entry: DocEntry, newName: String) {
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch {
             val ext = File(entry.path).extension
             val safeName = if (newName.endsWith(".txt") || newName.endsWith(".md")) newName
                            else if (ext.isNotEmpty()) "$newName.$ext" else "$newName.txt"
             val parent = File(entry.path).parentFile ?: docsDir
             val dst = File(parent, safeName)
             val src = File(entry.path)
-            if (dst.exists() || !src.renameTo(dst)) {
-                _snackbarMessage.value = "Could not rename"
-                return@launch
-            }
-            if (_engineReady.value) {
-                engine.setVar("::android_old", entry.path)
-                engine.setVar("::android_new", dst.absolutePath)
-                engine.eval("""
-                    recent-rename ${'$'}::android_old ${'$'}::android_new
-                    if {[lsearch -exact ${'$'}::favorites_list ${'$'}::android_old] >= 0} {
-                        toggle-favorite ${'$'}::android_old
-                        toggle-favorite ${'$'}::android_new
-                    }
-                    state-save
-                """.trimIndent())
-            }
+            val renamed = withContext(Dispatchers.IO) { !dst.exists() && src.renameTo(dst) }
+            if (!renamed) { _snackbarMessage.value = "Could not rename"; return@launch }
+            appState = StateStore.renamePath(appState, entry.path, dst.absolutePath)
+            withContext(Dispatchers.IO) { StateStore.save(stateFile, appState) }
             if (_currentFile.value?.path == entry.path) {
                 _currentFile.value = DocEntry(dst.name, dst.absolutePath)
             }
@@ -319,18 +309,10 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteFile(entry: DocEntry) {
-        viewModelScope.launch(Dispatchers.IO) {
-            File(entry.path).delete()
-            if (_engineReady.value) {
-                engine.setVar("::android_del", entry.path)
-                engine.eval("""
-                    recent-remove ${'$'}::android_del
-                    if {[lsearch -exact ${'$'}::favorites_list ${'$'}::android_del] >= 0} {
-                        toggle-favorite ${'$'}::android_del
-                    }
-                    state-save
-                """.trimIndent())
-            }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { File(entry.path).delete() }
+            appState = StateStore.removePath(appState, entry.path)
+            withContext(Dispatchers.IO) { StateStore.save(stateFile, appState) }
             if (_currentFile.value?.path == entry.path) {
                 _currentFile.value = null
                 _content.value = ""
@@ -344,23 +326,27 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     fun backupFile(entry: DocEntry) {
         viewModelScope.launch {
-            if (!_engineReady.value) return@launch
-            val result = withContext(Dispatchers.Default) {
-                engine.eval("android-backup {${entry.path}}")
+            try {
+                val dstName = withContext(Dispatchers.IO) {
+                    val src = File(entry.path)
+                    val backupsDir = File(docsDir, "backups").also { it.mkdirs() }
+                    val ts = SimpleDateFormat("yyyy-MM-dd'T'HH'h'mm'm'ss", Locale.US).format(Date())
+                    val ext = src.extension.let { if (it.isEmpty()) "" else ".$it" }
+                    val dst = File(backupsDir, "${src.nameWithoutExtension}_$ts$ext")
+                    src.copyTo(dst)
+                    dst.name
+                }
+                _snackbarMessage.value = "Backed up: $dstName"
+            } catch (_: Exception) {
+                _snackbarMessage.value = "Backup failed"
             }
-            _snackbarMessage.value = if (result.startsWith("ERROR:")) "Backup failed"
-                                     else "Backed up: ${File(result).name}"
         }
     }
 
     fun toggleFavorite(entry: DocEntry) {
-        viewModelScope.launch {
-            if (!_engineReady.value) return@launch
-            withContext(Dispatchers.Default) {
-                engine.eval("toggle-favorite {${entry.path}}\nstate-save")
-            }
-            refreshFavorites()
-        }
+        appState = StateStore.toggleFavorite(appState, entry.path)
+        viewModelScope.launch(Dispatchers.IO) { StateStore.save(stateFile, appState) }
+        refreshFavorites()
     }
 
     fun clearExternalFile() {
@@ -373,18 +359,15 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             val text = withContext(Dispatchers.IO) {
                 contentResolver.openInputStream(uri)?.use { it.bufferedReader().readText() } ?: ""
             }
-            // Try to resolve to a real file path so we can write with MANAGE_EXTERNAL_STORAGE
             val resolvedPath = withContext(Dispatchers.IO) { resolveContentUri(uri, contentResolver) }
-            val name = uri.lastPathSegment?.substringAfterLast('/')
-                ?.substringAfterLast(':') ?: "untitled.txt"
+            val name = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':') ?: "untitled.txt"
             if (resolvedPath != null && (File(resolvedPath).canWrite() || _storagePermissionGranted.value)) {
                 externalUri = null
                 externalWritable = false
                 _currentFile.value = DocEntry(name, resolvedPath)
-                if (_engineReady.value) {
-                    engine.eval("recent-push {$resolvedPath}")
-                    refreshRecents()
-                }
+                appState = StateStore.pushRecent(appState, resolvedPath)
+                withContext(Dispatchers.IO) { StateStore.save(stateFile, appState) }
+                refreshRecents()
             } else {
                 externalUri = uri
                 externalWritable = canWrite
@@ -398,7 +381,6 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun resolveContentUri(uri: Uri, cr: ContentResolver): String? {
         if (uri.scheme == "file") return uri.path
-        // ExternalStorageProvider (most file managers on Android)
         if (uri.authority == "com.android.externalstorage.documents") {
             return try {
                 val docId = DocumentsContract.getDocumentId(uri)
@@ -408,22 +390,18 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 val path = docId.substring(colon + 1)
                 if (storageType.equals("primary", ignoreCase = true))
                     "${Environment.getExternalStorageDirectory().absolutePath}/$path"
-                else
-                    "/storage/$storageType/$path"
+                else "/storage/$storageType/$path"
             } catch (_: Exception) { null }
         }
-        // File provider wrapping a file:// URI (Material Files: me.zhanghai.android.files.file.provider)
-        // Their content URI path contains a URL-encoded "file:///..." segment
         try {
             val decoded = Uri.decode(uri.toString())
             val fileIdx = decoded.indexOf("file:///")
             if (fileIdx >= 0) {
-                val path = decoded.substring(fileIdx + 7) // after "file://" → "/absolute/path"
+                val path = decoded.substring(fileIdx + 7)
                 val f = File(path)
                 if (f.exists()) return f.absolutePath
             }
         } catch (_: Exception) {}
-        // Fallback: _data column (MediaStore and some legacy providers)
         return try {
             cr.query(uri, arrayOf("_data"), null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst()) cursor.getString(0) else null
@@ -450,148 +428,101 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             viewModelScope.launch {
                 withContext(Dispatchers.IO) { File(entry.path).writeText(_content.value) }
                 _dirty.value = false
-                if (_engineReady.value) {
-                    engine.eval("state-save")
-                    if (entry.name == "writhdeck.ini") reloadConfig()
-                }
+                appState = StateStore.updateDaily(appState, entry.path, _wordCount.value, today())
+                withContext(Dispatchers.IO) { StateStore.save(stateFile, appState) }
+                if (entry.name == "writhdeck.ini") reloadConfig()
             }
             refreshStatus()
         }
     }
 
     private suspend fun reloadConfig() {
-        withContext(Dispatchers.Default) { engine.eval("ini-load\nkeys-init") }
-        fun String.singleWord() = trim().takeIf { it.isNotBlank() && !it.contains(' ') }
-        _headingMarker.value = engine.eval("set ::cfg_heading_marker").singleWord() ?: "="
-        _markdownHeadings.value = engine.eval("set ::cfg_markdown_headings").trim().let { it == "1" || it == "yes" || it == "true" }
-        _keyToc.value = engine.eval("set ::cfg_key_toc").singleWord() ?: "F11"
-        _timerType.value = engine.eval("set ::cfg_timer_type").trim().let { if (it == "stopwatch") "stopwatch" else "countdown" }
-        _marginWidth.value = (engine.eval("set ::cfg_margin_width").trim().toIntOrNull() ?: 16).coerceIn(0, 48)
-        _marginHeight.value = (engine.eval("set ::cfg_margin_height").trim().toIntOrNull() ?: 16).coerceIn(0, 32)
-        _darkModePreference.value = engine.eval("set ::cfg_android_dark_mode").trim()
-            .let { if (it == "auto" || it == "yes" || it == "no") it else "auto" }
-        _themeColors.value = loadThemeColors()
+        val iniFile = File(docsDir, "writhdeck.ini")
+        val text = withContext(Dispatchers.IO) {
+            if (iniFile.exists()) iniFile.readText() else return@withContext null
+        } ?: return
+        config = IniParser.parse(text)
+        applyConfig()
         refreshStatus()
     }
 
     private fun refreshStatus() {
-        if (!_engineReady.value) return
-        viewModelScope.launch {
-            val filepath = _currentFile.value?.path ?: ""
-            val dirty = if (_dirty.value) "1" else "0"
-            val raw = withContext(Dispatchers.Default) {
-                engine.setVar("::_asb_fn", filepath)
-                // Use catch so a missing proc (boot failure) doesn't surface as an error string
-                engine.eval("catch {android-status-build ${_wordCount.value} \$::_asb_fn $dirty} _sb_r; set _sb_r")
-            }
-            if (!raw.contains('\n')) return@launch  // error result has no newlines
-            val parts = raw.split("\n", limit = 3)
-            _statusBar.value = StatusBar(
-                left   = parts.getOrElse(0) { "" },
-                center = parts.getOrElse(1) { "" },
-                right  = parts.getOrElse(2) { "" }
-            )
-        }
+        val name = _currentFile.value?.name ?: ""
+        val left = if (name.isEmpty()) "" else if (_dirty.value) "$name *" else name
+
+        val wc = _wordCount.value
+        val goal = config.wordGoal
+        val center = if (goal > 0) "$wc / $goal" else "$wc w"
+
+        val showTimer = _timerLastTick.value != 0L || _timerActive.value
+        val right = if (showTimer) buildTimerDisplay() else ""
+
+        _statusBar.value = StatusBar(left, center, right)
     }
 
-    private fun isSystemDarkMode(): Boolean {
-        val flags = getApplication<Application>().resources.configuration.uiMode and
-                    Configuration.UI_MODE_NIGHT_MASK
-        return flags == Configuration.UI_MODE_NIGHT_YES
-    }
-
-    private suspend fun loadThemeColors(
-        systemDark: Boolean = isSystemDarkMode(),
-        pref: String = _darkModePreference.value
-    ): ThemeColors {
-        val useDark = when (pref) {
-            "yes" -> true
-            "no"  -> false
-            else  -> systemDark
-        }
-        val bgVar  = if (useDark) "::cfg_bg"             else "::cfg_bg_alt"
-        val fgVar  = if (useDark) "::cfg_fg"             else "::cfg_fg_alt"
-        val hdVar  = if (useDark) "::cfg_color_heading"  else "::cfg_color_heading_alt"
-        // One atomic eval: set dark mode flag + read the three color variables
-        val raw = engine.eval("""
-            set ::cfg_dark_mode ${if (useDark) 1 else 0}
-            list [set $bgVar] [set $fgVar] [set $hdVar]
-        """.trimIndent()).trim()
-        android.util.Log.d("WrithdeckTheme", "loadThemeColors pref=$pref useDark=$useDark raw='$raw'")
-        val parts = raw.split(Regex("\\s+"))
-        if (parts.size >= 3 && parts[0].startsWith("#"))
-            return ThemeColors(bg = parts[0], fg = parts[1], headingColor = parts[2])
-        android.util.Log.w("WrithdeckTheme", "color vars returned unexpected: '$raw'")
-        return ThemeColors()
+    private fun buildTimerDisplay(): String {
+        val secs = _timerRemaining.value
+        val m = secs / 60
+        val s = secs % 60
+        val display = "$m'${s.toString().padStart(2, '0')}\""
+        return if (_timerActive.value) "[$display]" else " $display"
     }
 
     // --- Timer ---
 
-    private fun applyTimerState(result: String, resetLastTick: Boolean = false) {
-        val parts = result.trim().split(" ")
-        val active = parts.getOrNull(0) == "1"
-        val remaining = parts.getOrNull(1)?.toIntOrNull() ?: 0
-        val tclTick = parts.getOrNull(2)?.toLongOrNull() ?: 0L
-        _timerActive.value = active
-        _timerRemaining.value = remaining
-        if (resetLastTick) {
-            _timerLastTick.value = if (tclTick == 0L) 0L else System.currentTimeMillis()
-        }
-    }
-
-    private fun startTick() {
-        timerJob?.cancel()
-        timerJob = viewModelScope.launch {
-            while (true) {
-                delay(1000)
-                val result = engine.eval("android-timer-tick")
-                val parts = result.trim().split(" ")
-                val active = parts.getOrNull(0) == "1"
-                val remaining = parts.getOrNull(1)?.toIntOrNull() ?: 0
-                _timerRemaining.value = remaining
-                _timerActive.value = active
-                _timerLastTick.value = System.currentTimeMillis()
-                refreshStatus()
-                if (!active) break
-            }
-        }
-    }
-
     fun timerStart() {
-        viewModelScope.launch {
-            val result = engine.eval("android-timer-start")
-            applyTimerState(result)
-            _timerLastTick.value = System.currentTimeMillis()
-            startTick()
-        }
+        timerJob?.cancel()
+        _timerRemaining.value = if (_timerType.value == "stopwatch") 0 else config.timerDurationSecs()
+        _timerActive.value = true
+        _timerLastTick.value = System.currentTimeMillis()
+        startTick()
+        refreshStatus()
     }
 
     fun timerPause() {
         timerJob?.cancel()
         timerJob = null
-        viewModelScope.launch {
-            val result = engine.eval("android-timer-pause")
-            applyTimerState(result)
-        }
+        _timerActive.value = false
+        refreshStatus()
     }
 
     fun timerResume() {
         if (_timerLastTick.value == 0L) { timerStart(); return }
-        viewModelScope.launch {
-            val result = engine.eval("android-timer-resume")
-            applyTimerState(result)
-            _timerLastTick.value = System.currentTimeMillis()
-            startTick()
-        }
+        _timerActive.value = true
+        _timerLastTick.value = System.currentTimeMillis()
+        startTick()
+        refreshStatus()
     }
 
     fun timerReset() {
         timerJob?.cancel()
         timerJob = null
-        viewModelScope.launch {
-            val result = engine.eval("android-timer-reset")
-            applyTimerState(result)
-            _timerLastTick.value = 0L
+        _timerActive.value = false
+        _timerLastTick.value = 0L
+        _timerRemaining.value = if (_timerType.value == "stopwatch") 0 else config.timerDurationSecs()
+        refreshStatus()
+    }
+
+    private fun startTick() {
+        timerJob = viewModelScope.launch {
+            while (true) {
+                delay(1000)
+                if (_timerType.value == "stopwatch") {
+                    _timerRemaining.value++
+                } else {
+                    val next = _timerRemaining.value - 1
+                    if (next <= 0) {
+                        _timerRemaining.value = 0
+                        _timerActive.value = false
+                        _timerLastTick.value = System.currentTimeMillis()
+                        refreshStatus()
+                        break
+                    }
+                    _timerRemaining.value = next
+                }
+                _timerLastTick.value = System.currentTimeMillis()
+                refreshStatus()
+            }
         }
     }
 
@@ -599,43 +530,39 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun getDailyStats(): List<StatEntry> {
         val entry = _currentFile.value ?: return emptyList()
-        val path = entry.path
-        if (!_engineReady.value) return emptyList()
-        return withContext(Dispatchers.Default) {
-            engine.eval("android-get-stats {$path} ${_wordCount.value}")
-                .lines()
-                .filter { it.isNotBlank() }
-                .mapNotNull { line ->
-                    val parts = line.split("\t")
-                    if (parts.size >= 2) StatEntry(parts[0], parts[1].toIntOrNull() ?: 0) else null
-                }
-        }
+        appState = StateStore.updateDaily(appState, entry.path, _wordCount.value, today())
+        withContext(Dispatchers.IO) { StateStore.save(stateFile, appState) }
+        return (appState.daily[entry.path] ?: return emptyList())
+            .entries.sortedByDescending { it.key }
+            .map { (date, cnt) -> StatEntry(date, cnt) }
     }
 
     // --- Word occurrences ---
 
-    suspend fun getWordOccurrences(): List<Pair<String, Int>> {
-        if (!_engineReady.value) return emptyList()
-        return withContext(Dispatchers.Default) {
-            engine.setVar("::android_content", _content.value)
-            engine.eval("android-word-occurrences \$::android_content")
-                .lines()
-                .filter { it.isNotBlank() }
-                .mapNotNull { line ->
-                    val tab = line.indexOf('\t')
-                    if (tab < 0) null
-                    else line.substring(0, tab) to (line.substring(tab + 1).toIntOrNull() ?: 0)
-                }
+    suspend fun getWordOccurrences(): List<Pair<String, Int>> =
+        withContext(Dispatchers.Default) {
+            val text = _content.value
+            val counts = mutableMapOf<String, Int>()
+            for (m in Regex("[\\p{L}]+").findAll(text)) {
+                val word = m.value.lowercase()
+                if (word.length >= 3) counts[word] = (counts[word] ?: 0) + 1
+            }
+            counts.entries.sortedByDescending { it.value }.map { it.key to it.value }
         }
-    }
 
     private fun countWords(text: String): Int =
         text.trim().split(Regex("\\s+")).count { it.isNotEmpty() }
 
-    override fun onCleared() {
-        timerJob?.cancel()
-        engine.destroy()
+    private fun today(): String =
+        SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+
+    private fun isSystemDarkMode(): Boolean {
+        val flags = getApplication<Application>().resources.configuration.uiMode and
+                    Configuration.UI_MODE_NIGHT_MASK
+        return flags == Configuration.UI_MODE_NIGHT_YES
     }
+
+    override fun onCleared() { timerJob?.cancel() }
 
     private fun checkStoragePermission(): Boolean {
         val app = getApplication<Application>()
