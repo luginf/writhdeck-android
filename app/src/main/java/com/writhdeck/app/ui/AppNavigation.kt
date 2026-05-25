@@ -8,9 +8,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.writhdeck.app.DocEntry
 import com.writhdeck.app.WrithdeckViewModel
-import java.net.URLEncoder
 
 @Composable
 fun AppNavigation(vm: WrithdeckViewModel = viewModel(), onRequestPermission: () -> Unit = {}) {
@@ -32,6 +30,9 @@ fun AppNavigation(vm: WrithdeckViewModel = viewModel(), onRequestPermission: () 
                     vm.openFile(entry)
                     nav.navigate("editor") { launchSingleTop = true }
                 },
+                onNavigateSchemes = {
+                    nav.navigate("schemes") { launchSingleTop = true }
+                },
                 onRequestPermission = onRequestPermission
             )
         }
@@ -40,6 +41,9 @@ fun AppNavigation(vm: WrithdeckViewModel = viewModel(), onRequestPermission: () 
                 vm.clearExternalFile()
                 nav.popBackStack()
             })
+        }
+        composable("schemes") {
+            SchemeConfigScreen(vm = vm, onBack = { nav.popBackStack() })
         }
     }
 }

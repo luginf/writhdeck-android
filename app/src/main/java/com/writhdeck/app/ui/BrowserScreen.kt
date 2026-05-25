@@ -12,6 +12,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.DarkMode
@@ -48,6 +49,7 @@ import java.util.Locale
 fun BrowserScreen(
     vm: WrithdeckViewModel,
     onOpenFile: (DocEntry) -> Unit,
+    onNavigateSchemes: () -> Unit = {},
     onRequestPermission: () -> Unit
 ) {
     val docs by vm.docs.collectAsStateWithLifecycle()
@@ -143,6 +145,9 @@ fun BrowserScreen(
                         }
                     }) {
                         Icon(Icons.Default.Keyboard, contentDescription = "Keyboard shortcuts")
+                    }
+                    IconButton(onClick = onNavigateSchemes) {
+                        Icon(Icons.Default.Palette, contentDescription = "Color schemes")
                     }
                     IconButton(onClick = { vm.openIniFile() }) {
                         Icon(Icons.Default.Settings, contentDescription = "Config")

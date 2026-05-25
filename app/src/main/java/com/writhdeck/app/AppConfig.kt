@@ -21,9 +21,11 @@ data class AppConfig(
     val wordGoal: Int = 0,
     val keyToc: String = "F11",
     val docsCustomDir: String = "",
-    val activeProfile: String = "default"
+    val activeProfile: String = "default",
+    val customSchemes: Map<String, SchemeColors> = emptyMap()
 ) {
-    fun schemeColors(): SchemeColors = BUILTIN_SCHEMES[scheme] ?: BUILTIN_SCHEMES["default"]!!
+    fun schemeColors(): SchemeColors =
+        customSchemes[scheme] ?: BUILTIN_SCHEMES[scheme] ?: BUILTIN_SCHEMES["default"]!!
 
     fun themeColors(useDark: Boolean): ThemeColors {
         val c = schemeColors()
@@ -39,7 +41,9 @@ object IniParser {
     fun parse(text: String): AppConfig {
         val global = mutableMapOf<String, String>()
         val profiles = mutableMapOf<String, MutableMap<String, String>>()
+        val schemes = mutableMapOf<String, MutableMap<String, String>>()
         var currentProfile: String? = null
+        var currentScheme: String? = null
 
         for (raw in text.lines()) {
             val line = raw.trim()
@@ -47,13 +51,14 @@ object IniParser {
             // WrithDeck section header:  = title =
             if (line.startsWith("=") && line.endsWith("=") && line.length > 2) {
                 val title = line.trim('=').trim()
-                currentProfile = if (title.startsWith("profile:"))
-                    title.removePrefix("profile:").trim() else null
+                currentProfile = if (title.startsWith("profile:")) title.removePrefix("profile:").trim() else null
+                currentScheme  = if (title.startsWith("scheme:"))  title.removePrefix("scheme:").trim()  else null
                 continue
             }
             // Standard INI section header: [section]
             if (line.startsWith("[") && line.endsWith("]")) {
                 currentProfile = null
+                currentScheme  = null
                 continue
             }
             val eq = line.indexOf('=')
@@ -63,15 +68,14 @@ object IniParser {
             value = value.replace(Regex("\\s+[#%].*$"), "")
             if (key.isEmpty()) continue
 
-            if (currentProfile != null) {
-                profiles.getOrPut(currentProfile) { mutableMapOf() }[key] = value
-            } else {
-                global[key] = value
+            when {
+                currentScheme  != null -> schemes.getOrPut(currentScheme!!)  { mutableMapOf() }[key] = value
+                currentProfile != null -> profiles.getOrPut(currentProfile!!) { mutableMapOf() }[key] = value
+                else                   -> global[key] = value
             }
         }
 
         val activeProfile = global["active_profile"]?.takeIf { it.isNotBlank() } ?: "default"
-        // Profile keys take precedence over global keys for profile-specific settings.
         val keys = global.toMutableMap().also { it.putAll(profiles[activeProfile] ?: emptyMap()) }
 
         fun bool(k: String, def: Boolean): Boolean {
@@ -80,6 +84,11 @@ object IniParser {
         }
         fun int(k: String, def: Int): Int = keys[k]?.toIntOrNull() ?: def
         fun str(k: String, def: String): String = keys[k]?.takeIf { it.isNotBlank() } ?: def
+
+        val customSchemes: Map<String, SchemeColors> = schemes.mapValues { (name, map) ->
+            val base = BUILTIN_SCHEMES[name] ?: BUILTIN_SCHEMES["default"]!!
+            schemeFromMap(map, base)
+        }
 
         return AppConfig(
             scheme           = str("scheme", "default"),
@@ -100,7 +109,8 @@ object IniParser {
             wordGoal         = int("word_goal", 0).coerceAtLeast(0),
             keyToc           = str("key_toc", "F11"),
             docsCustomDir    = keys["docs_dir"] ?: "",
-            activeProfile    = activeProfile
+            activeProfile    = activeProfile,
+            customSchemes    = customSchemes
         )
     }
 
@@ -177,5 +187,103 @@ object IniParser {
             for (k in missing) result.appendLine("$k = ${toSet[k]}")
         }
         return result.toString().trimEnd() + "\n"
+    }
+
+    /** Patch a key only within a specific profile section. */
+    fun patchProfileKey(text: String, profile: String, key: String, value: String): String {
+        val targetHeader = "= profile: $profile ="
+        val lines = text.lines()
+        val result = StringBuilder()
+        var inTarget = false
+        var patched = false
+
+        for (raw in lines) {
+            val trimmed = raw.trim()
+            if (trimmed.startsWith("=") && trimmed.endsWith("=") && trimmed.length > 2) {
+                inTarget = (trimmed == targetHeader)
+            } else if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+                inTarget = false
+            }
+            if (inTarget && !patched) {
+                val eq = trimmed.indexOf('=')
+                if (eq > 0 && !trimmed.startsWith("#") && !trimmed.startsWith("%")) {
+                    val k = trimmed.substring(0, eq).trim()
+                    if (k == key) {
+                        result.appendLine("$key = $value")
+                        patched = true
+                        continue
+                    }
+                }
+            }
+            result.appendLine(raw)
+        }
+        if (!patched) {
+            result.appendLine()
+            result.appendLine("$key = $value")
+        }
+        return result.toString().trimEnd() + "\n"
+    }
+
+    /** Remove a custom scheme section from INI text. */
+    fun removeSchemeSection(text: String, name: String): String {
+        val header = "= scheme: $name ="
+        val lines = text.lines()
+        val result = mutableListOf<String>()
+        var skipping = false
+        for (line in lines) {
+            val trimmed = line.trim()
+            if (trimmed == header) { skipping = true; continue }
+            if (skipping) {
+                val isNewSection = (trimmed.startsWith("=") && trimmed.endsWith("=") && trimmed.length > 2)
+                    || (trimmed.startsWith("[") && trimmed.endsWith("]"))
+                if (isNewSection) skipping = false else continue
+            }
+            result.add(line)
+        }
+        return result.joinToString("\n").trimEnd() + "\n"
+    }
+
+    /** Insert or replace a custom scheme section in INI text. */
+    fun writeCustomScheme(text: String, name: String, colors: SchemeColors): String =
+        removeSchemeSection(text, name).trimEnd() + "\n" + schemeToIniSection(name, colors) + "\n"
+
+    private fun schemeFromMap(map: Map<String, String>, base: SchemeColors) = SchemeColors(
+        bg       = map["color_bg"]          ?: base.bg,
+        fg       = map["color_fg"]          ?: base.fg,
+        bgBar    = map["color_bg_bar"]      ?: base.bgBar,
+        fgBar    = map["color_fg_bar"]      ?: base.fgBar,
+        bgSel    = map["color_bg_sel"]      ?: base.bgSel,
+        heading  = map["color_heading"]     ?: base.heading,
+        comment  = map["color_comment"]     ?: base.comment,
+        markup   = map["color_markup"]      ?: base.markup,
+        bgAlt    = map["color_bg_alt"]      ?: base.bgAlt,
+        fgAlt    = map["color_fg_alt"]      ?: base.fgAlt,
+        bgBarAlt = map["color_bg_bar_alt"]  ?: base.bgBarAlt,
+        fgBarAlt = map["color_fg_bar_alt"]  ?: base.fgBarAlt,
+        bgSelAlt = map["color_bg_sel_alt"]  ?: base.bgSelAlt,
+        headingAlt  = map["color_heading_alt"]  ?: base.headingAlt,
+        commentAlt  = map["color_comment_alt"]  ?: base.commentAlt,
+        markupAlt   = map["color_markup_alt"]   ?: base.markupAlt
+    )
+
+    private fun schemeToIniSection(name: String, colors: SchemeColors) = buildString {
+        appendLine()
+        appendLine("= scheme: $name =")
+        appendLine("color_bg = ${colors.bg}")
+        appendLine("color_fg = ${colors.fg}")
+        appendLine("color_bg_bar = ${colors.bgBar}")
+        appendLine("color_fg_bar = ${colors.fgBar}")
+        appendLine("color_bg_sel = ${colors.bgSel}")
+        appendLine("color_heading = ${colors.heading}")
+        appendLine("color_comment = ${colors.comment}")
+        appendLine("color_markup = ${colors.markup}")
+        appendLine("color_bg_alt = ${colors.bgAlt}")
+        appendLine("color_fg_alt = ${colors.fgAlt}")
+        appendLine("color_bg_bar_alt = ${colors.bgBarAlt}")
+        appendLine("color_fg_bar_alt = ${colors.fgBarAlt}")
+        appendLine("color_bg_sel_alt = ${colors.bgSelAlt}")
+        appendLine("color_heading_alt = ${colors.headingAlt}")
+        appendLine("color_comment_alt = ${colors.commentAlt}")
+        append("color_markup_alt = ${colors.markupAlt}")
     }
 }

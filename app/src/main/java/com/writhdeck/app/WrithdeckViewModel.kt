@@ -101,6 +101,12 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     private val _fileWritable = MutableStateFlow(true)
     val fileWritable = _fileWritable.asStateFlow()
 
+    private val _customSchemes = MutableStateFlow<Map<String, SchemeColors>>(emptyMap())
+    val customSchemes = _customSchemes.asStateFlow()
+
+    private val _activeScheme = MutableStateFlow("default")
+    val activeScheme = _activeScheme.asStateFlow()
+
     private var timerJob: Job? = null
     private var externalUri: Uri? = null
     private var externalWritable = false
@@ -147,6 +153,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _marginWidth.value = config.marginWidth
         _marginHeight.value = config.marginHeight
         _darkModePreference.value = config.androidDarkMode
+        _customSchemes.value = config.customSchemes
+        _activeScheme.value = config.scheme
         _themeColors.value = config.themeColors(resolveUseDark())
     }
 
@@ -489,6 +497,48 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         val s = secs % 60
         val display = "$m'${s.toString().padStart(2, '0')}\""
         return if (_timerActive.value) "[$display]" else " $display"
+    }
+
+    // --- Schemes ---
+
+    fun setActiveScheme(name: String) {
+        config = config.copy(scheme = name)
+        applyConfig()
+        viewModelScope.launch(Dispatchers.IO) {
+            val iniFile = File(docsDir, "writhdeck.ini")
+            if (iniFile.exists()) {
+                iniFile.writeText(IniParser.patchProfileKey(iniFile.readText(), config.activeProfile, "scheme", name))
+            }
+        }
+    }
+
+    fun saveCustomScheme(name: String, colors: SchemeColors) {
+        val updated = config.customSchemes.toMutableMap().also { it[name] = colors }
+        config = config.copy(customSchemes = updated)
+        applyConfig()
+        viewModelScope.launch(Dispatchers.IO) {
+            val iniFile = File(docsDir, "writhdeck.ini")
+            val text = if (iniFile.exists()) iniFile.readText() else IniParser.write(config)
+            iniFile.writeText(IniParser.writeCustomScheme(text, name, colors))
+        }
+    }
+
+    fun deleteCustomScheme(name: String) {
+        val wasActive = config.scheme == name
+        val updated = config.customSchemes.toMutableMap().also { it.remove(name) }
+        val newScheme = if (wasActive) "default" else config.scheme
+        config = config.copy(customSchemes = updated, scheme = newScheme)
+        applyConfig()
+        viewModelScope.launch(Dispatchers.IO) {
+            val iniFile = File(docsDir, "writhdeck.ini")
+            if (iniFile.exists()) {
+                var text = IniParser.removeSchemeSection(iniFile.readText(), name)
+                if (wasActive) {
+                    text = IniParser.patchProfileKey(text, config.activeProfile, "scheme", "default")
+                }
+                iniFile.writeText(text)
+            }
+        }
     }
 
     // --- Timer ---
