@@ -141,6 +141,27 @@ Via `contentResolver.openOutputStream()` if `canWrite`. URI stored in `externalU
 
 ---
 
+## Color schemes — état actuel et roadmap
+
+Les 8 schemes sont définis en dur dans `ColorSchemes.kt` (`BUILTIN_SCHEMES`). L'INI stocke uniquement le nom du scheme actif (`scheme = everforest`) dans le profil. L'utilisateur ne peut pas voir ni modifier les valeurs de couleur depuis l'app.
+
+**À implémenter :** écran de configuration graphique (accessible depuis les Settings) permettant de :
+1. Sélectionner un scheme parmi les 8 builtins
+2. Visualiser et modifier les couleurs individuelles
+3. Sauvegarder la version modifiée dans `writhdeck.ini` sous `= scheme: nom =`
+
+**Format INI des schemes custom** (compatible desktop) :
+```ini
+= scheme: mycustom =
+color_bg = #1a1a1a
+color_fg = #e8e8e8
+color_heading = #c8a060
+...
+```
+`IniParser` devra parser ces sections et les surcharger dans `BUILTIN_SCHEMES` au chargement.
+
+---
+
 ## What not to do
 
 - Do not add Tcl/JNI — the engine is gone, all logic is pure Kotlin.
