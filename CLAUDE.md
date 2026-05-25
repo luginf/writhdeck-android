@@ -2,19 +2,16 @@
 
 Instructions for Claude Code in this repository.
 
-## Companion project
+---
 
-This repository is the Android frontend for WrithDeck. The Tcl engine and all rules
-regarding `state.tcl`, `config.tcl`, `boot-android.tcl`, color schemes, INI,
-daily stats and the timer are documented in:
+## Architecture
 
-**`../writhdeck/CLAUDE.md`** — general Tcl engine rules  
-**`../writhdeck/ANDROID.md`** — Android architecture, JNI init order, Gradle task  
-**`../writhdeck/SKILLS.md`** — full technical reference (Android patterns included)
-
-Always consult these files before modifying `boot-android.tcl` or the Kotlin <-> Tcl
-interactions. The writhdeck repository is expected at `../writhdeck/` (side by side in
-the same parent directory).
+Pure Kotlin + Jetpack Compose. No Tcl/JNI engine. All logic is in Kotlin:
+- INI parsing/writing: `IniParser` in `AppConfig.kt`
+- State persistence: `StateStore` in `StateStore.kt`
+- Color schemes: `ColorSchemes.kt` — 8 built-in schemes
+- Business logic + UI state: `WrithdeckViewModel.kt`
+- UI: Jetpack Compose screens in `ui/`
 
 ---
 
@@ -22,15 +19,9 @@ the same parent directory).
 
 ```sh
 # From writhdeck-android/
-./tools/build-tcl-android.sh arm64-v8a   # device
-./tools/build-tcl-android.sh x86_64      # emulator
 ./gradlew assembleDebug
 # -> app/build/outputs/apk/debug/writhdeck-debug.apk
 ```
-
-The `preBuild` Gradle task automatically copies `../writhdeck/src/state.tcl`,
-`../writhdeck/src/config.tcl` and `../writhdeck/src/schemes/*.tcl` into assets.
-`app/src/main/assets/tcl/lib/tcl8.6/` is committed — no need to regenerate it.
 
 ---
 
@@ -38,98 +29,121 @@ The `preBuild` Gradle task automatically copies `../writhdeck/src/state.tcl`,
 
 | File | Role |
 |---|---|
-| `app/src/main/assets/tcl/boot-android.tcl` | Tcl bootstrap: loads state+config, defines `android-*` procs |
-| `app/src/main/cpp/writhdeck_jni.c` | C JNI bridge: `nativeInit`, `nativeEval`, `nativeGetVar`, `nativeSetVar` |
-| `app/src/main/java/com/writhdeck/app/WrithdeckEngine.kt` | Kotlin wrapper for the JNI bridge |
-| `app/src/main/java/com/writhdeck/app/WrithdeckViewModel.kt` | ViewModel: StateFlows, engine init, timer, config |
-| `app/src/main/java/com/writhdeck/app/ui/EditorScreen.kt` | Compose editor: BasicTextField, TOC, command mode, distraction-free |
-| `app/src/main/java/com/writhdeck/app/ui/BrowserScreen.kt` | Compose file browser |
-| `app/build.gradle.kts` | Gradle config + `copyTclModules` task |
-| `app/src/main/cpp/CMakeLists.txt` | NDK CMake config |
-| `tools/build-tcl-android.sh` | Cross-compile Tcl 8.6 -> `libtcl8.6.a` |
+| `app/src/main/java/com/writhdeck/app/AppConfig.kt` | `AppConfig` data class + `IniParser` (parse/write/patchKeys) + `ThemeColors` |
+| `app/src/main/java/com/writhdeck/app/StateStore.kt` | `AppState` + hand-rolled JSON load/save + path migration |
+| `app/src/main/java/com/writhdeck/app/ColorSchemes.kt` | `SchemeColors` + `BUILTIN_SCHEMES` map (8 schemes) |
+| `app/src/main/java/com/writhdeck/app/WrithdeckViewModel.kt` | ViewModel: StateFlows, timer, docs, favorites, config |
+| `app/src/main/java/com/writhdeck/app/MainActivity.kt` | Entry point, system dark mode, storage permission |
+| `app/src/main/java/com/writhdeck/app/ui/BrowserScreen.kt` | File browser with keyboard shortcut support |
+| `app/src/main/java/com/writhdeck/app/ui/EditorScreen.kt` | Editor: BasicTextField, TOC, command mode |
+| `app/build.gradle.kts` | Gradle config (no NDK, no Tcl dependencies) |
 
 ---
 
-## Critical rules
+## Critical patterns
 
-### JNI init (`writhdeck_jni.c`)
+### INI parsing
 
-`tcl_library` must be set **before** `Tcl_Init()` — without this, Tcl looks for
-`/usr/local/lib/tcl8.6/`, fails silently, and `boot-android.tcl` never runs
-(empty ini, no config).
+`IniParser.parse()` is section-aware. `= profile: name =` headers route keys into per-profile maps; `active_profile` in the global section selects which profile's keys override the globals.
 
-```c
-interp = Tcl_CreateInterp();
-Tcl_SetVar(interp, "tcl_library", lib_path, TCL_GLOBAL_ONLY);  // BEFORE Tcl_Init
-if (Tcl_Init(interp) != TCL_OK) { LOGE(...); }  // non-fatal
-Tcl_SetVar(interp, "::ANDROID_FILES_DIR", dir, TCL_GLOBAL_ONLY);
+`IniParser.write()` generates a complete template with:
+- Comment listing all 8 schemes
+- Two profile sections: `= profile: default =` and `= profile: novel =`
+- `active_profile = default` in the global section
+
+`IniParser.patchKeys()` patches specific key=value pairs in existing INI text, preserving all other content (used by `setDarkModePreference`).
+
+`initApp()` creates `writhdeck.ini` with default content on first launch so it always appears in the documents list.
+
+### State persistence (`StateStore`)
+
+Hand-rolled JSON, compatible with the desktop `.writhdeck.json` format. Path migration on load converts old Tcl-normalized paths:
+
+```kotlin
+// Tcl `file normalize` used to convert /storage/emulated/0/ → /data/media/0/ (unreadable)
+private fun migratePath(path: String): String =
+    if (path.startsWith("/data/media/0/"))
+        "/storage/emulated/0/" + path.removePrefix("/data/media/0/")
+    else path
 ```
 
-### Tcl boot (`boot-android.tcl`)
-
-Mandatory order:
-1. Source `state.tcl` + `config.tcl`
-2. Source `schemes/*.tcl`
-3. `schemes-init` — populates `cfg_schemes` **before** `ini-load`
-4. `file mkdir $::DOCS_DIR_DEFAULT` — **before** `ini-load` (otherwise `ini-save` fails)
-5. `ini-load` -> `keys-init` -> `state-load`
+Applied in `load()` to cursors keys, favorites list, recent list, and daily map keys.
 
 ### BasicTextField and cursor
 
-Use `remember { }` **without a content key**. `remember(content) { }` resets the
-cursor to position 0 on every keystroke. `LaunchedEffect(content)` handles
-synchronization on external file open.
+Use `remember { }` **without a content key**. `remember(content) { }` resets the cursor to position 0 on every keystroke. `LaunchedEffect(content)` handles sync on external file open.
 
-### VisualTransformation (heading colors)
+### IME / keyboard in BrowserScreen
 
-`HeadingVisualTransformation` applies `SpanStyle(color = headingColor)` to heading
-lines without modifying the underlying text. Uses `OffsetMapping.Identity` — no
-offset shift. Existing spans are preserved via `buildAnnotatedString { append(text) }`.
+The invisible `BasicTextField` (1dp, alpha 0) captures hardware keyboard shortcuts. It must never auto-show the IME on navigation return from the editor.
 
-### Color theme
-
-Read active colors via a single Tcl call:
+Pattern (`imeAllowed` flag):
 ```kotlin
-val raw = engine.eval("android-get-theme")   // returns "bg fg headingColor"
+var imeAllowed by remember { mutableStateOf(false) }
+
+// Keyboard icon button:
+if (imeVisible) {
+    imeAllowed = false
+    keyboardController?.hide()
+} else {
+    imeAllowed = true
+    focusRequester.requestFocus()
+    keyboardController?.show()
+}
+
+// BasicTextField modifier:
+.onFocusChanged { fs ->
+    if (fs.isFocused && !imeAllowed) keyboardController?.hide()
+}
+
+// Each onOpenFile call:
+imeAllowed = false; onOpenFile(entry)
 ```
-The `android-get-theme` proc (in `boot-android.tcl`) returns the correct values
-based on `cfg_dark_mode`. Never read `cfg_bg` / `cfg_fg` separately.
 
-### Timer
+### Color themes
 
-The tick is driven by a Kotlin coroutine (`delay(1000)` + `android-timer-tick`).
-Never call the native `timer-start` / `timer-tick` procs (they use `after`, which
-requires a Tcl event loop that is absent on Android).
+`AppConfig.themeColors(useDark: Boolean): ThemeColors` returns `ThemeColors(bg, fg, headingColor)` from the active scheme. `ThemeColors` is defined in `AppConfig.kt`.
 
-`timerLastTick == 0L` in Kotlin <-> `timer_last_tick == 0` in Tcl -> timer never
-started or reset (hides the timer in the status bar).
+`applyConfig()` calls `config.themeColors(resolveUseDark())` and pushes to `_themeColors`. `updateThemeColors(systemDark)` is called by `MainActivity` when the system dark mode changes.
+
+### Config reload
+
+After saving `writhdeck.ini` from the editor: `reloadConfig()` re-parses the file, updates `config`, calls `applyConfig()` to push all affected StateFlows.
+
+### Read-only files (`fileWritable`)
+
+`_fileWritable: MutableStateFlow<Boolean>` — set in `openFile` (`File.canWrite()`), `openExternalContent` (from intent `canWrite` flag), and `saveFile` (set to `false` on write failure).
+
+EditorScreen behavior when `!fileWritable`:
+- Title shows `[read-only]` suffix
+- Save button disabled
+- AlertDialog on file open
+- "Discard changes?" confirmation on back navigation when dirty
+
+**Never use `storagePermissionGranted` to bypass `File.canWrite()`** — that permission doesn't grant access to other apps' private directories (e.g. Termux `/data/data/com.termux/files/`). Files from those paths must be written via `contentResolver.openOutputStream(uri)` when the intent grants `FLAG_GRANT_WRITE_URI_PERMISSION`.
+
+### Margins
+
+Desktop configs may have `margin_width` up to 180. Always `coerceIn(0, 48)` on Android to prevent zero-width text area (enforced in `IniParser.parse()`).
 
 ### External file save
 
-Via `contentResolver.openOutputStream()` if `canWrite`. The URI is stored in
-`_externalUri` in the ViewModel for subsequent saves without re-picking.
-
-### Config reload (`reloadConfig`)
-
-After saving `writhdeck.ini`: re-run `ini-load + keys-init` in the engine,
-then update all affected StateFlows (theme, headingMarker, markdownHeadings...).
+Via `contentResolver.openOutputStream()` if `canWrite`. URI stored in `externalUri` for subsequent saves without re-picking.
 
 ---
 
 ## Kotlin/Compose patterns
 
 - `collectAsStateWithLifecycle()` for all ViewModel StateFlows
-- `remember(key) { ... }` for expensive derived values (parseHexColor, buildToc)
-- `ModalBottomSheet` for overlays (commands, TOC)
-- `BackHandler` to intercept the system back gesture (e.g. exiting distraction-free mode)
-- `imePadding()` on the editor to prevent the soft keyboard from covering text
+- `remember(key) { ... }` for expensive derived values (`parseHexColor`, `buildToc`)
+- `BackHandler` to intercept the system back gesture
+- `imePadding()` on the editor to prevent soft keyboard from covering text
 
 ---
 
 ## What not to do
 
-- Do not modify `state.tcl` / `config.tcl` in `assets/tcl/` — they are overwritten by Gradle.
-- Do not call `ini-load` directly from Kotlin without calling `schemes-init` first.
-- Do not commit `tcl-android/`, `tcl8.6.15/`, `app/src/main/assets/tcl/state.tcl`,
-  `app/src/main/assets/tcl/config.tcl`, `app/src/main/assets/tcl/schemes/` (listed in `.gitignore`).
+- Do not add Tcl/JNI — the engine is gone, all logic is pure Kotlin.
+- Do not use `remember(content) { }` in `BasicTextField` — resets cursor on every keystroke.
+- Do not call `focusRequester.requestFocus()` automatically on BrowserScreen open — use the `imeAllowed` pattern.
 - Never commit on behalf of the user — let the user decide when and how to commit.

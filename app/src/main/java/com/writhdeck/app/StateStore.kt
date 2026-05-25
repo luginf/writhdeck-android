@@ -15,12 +15,12 @@ object StateStore {
         if (!file.exists()) return AppState()
         val raw = try { file.readText(Charsets.UTF_8) } catch (_: Exception) { return AppState() }
 
-        val cursors = parseCursors(raw)
-        val favorites = parseArray(raw, "favorites")
-        val recent = parseArray(raw, "recent")
+        val cursors = parseCursors(raw).mapKeys { migratePath(it.key) }
+        val favorites = parseArray(raw, "favorites").map { migratePath(it) }
+        val recent = parseArray(raw, "recent").map { migratePath(it) }
 
         val daily = mutableMapOf<String, MutableMap<String, Int>>()
-        for (entry in parseArray(raw, "daily")) {
+        for (entry in parseArray(raw, "daily").map { migratePath(it) }) {
             val parts = entry.split("\t")
             if (parts.size < 3) continue
             val path = parts[0]
@@ -114,6 +114,12 @@ object StateStore {
         fileData[today] = wordCount
         return state.copy(daily = state.daily + (path to fileData))
     }
+
+    // Convert Tcl-normalized paths (/data/media/0/) back to the user-visible paths.
+    private fun migratePath(path: String): String =
+        if (path.startsWith("/data/media/0/"))
+            "/storage/emulated/0/" + path.removePrefix("/data/media/0/")
+        else path
 
     // --- JSON parsing (hand-rolled, no external lib) ---
 

@@ -22,8 +22,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -86,6 +90,9 @@ fun BrowserScreen(
     // Keyboard shortcut support (hardware keyboard + virtual keyboard via icon)
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    var imeAllowed by remember { mutableStateOf(false) }
     var shortcutBuffer by remember { mutableStateOf(TextFieldValue("")) }
 
     fun handleShortcut(ch: Char) {
@@ -124,10 +131,16 @@ fun BrowserScreen(
                     IconButton(onClick = { vm.setDarkModePreference(nextDarkPref) }) {
                         Icon(darkModeIcon, contentDescription = "Dark mode: $darkPref")
                     }
-                    // Virtual keyboard toggle — brings up keyboard for shortcut input
+                    // Virtual keyboard toggle
                     IconButton(onClick = {
-                        try { focusRequester.requestFocus() } catch (_: Exception) {}
-                        keyboardController?.show()
+                        if (imeVisible) {
+                            imeAllowed = false
+                            keyboardController?.hide()
+                        } else {
+                            imeAllowed = true
+                            try { focusRequester.requestFocus() } catch (_: Exception) {}
+                            keyboardController?.show()
+                        }
                     }) {
                         Icon(Icons.Default.Keyboard, contentDescription = "Keyboard shortcuts")
                     }
@@ -209,7 +222,7 @@ fun BrowserScreen(
                                 entry = entry,
                                 isFavorite = true,
                                 isSelected = selectedEntry?.path == entry.path,
-                                onClick = { selectedEntry = entry; onOpenFile(entry) },
+                                onClick = { selectedEntry = entry; imeAllowed = false; onOpenFile(entry) },
                                 onLongClick = { selectedEntry = entry; contextEntry = entry; showContextMenu = true },
                                 onToggleFavorite = { selectedEntry = entry; vm.toggleFavorite(entry) }
                             )
@@ -240,7 +253,7 @@ fun BrowserScreen(
                                 entry = entry,
                                 isFavorite = entry.path in favPaths,
                                 isSelected = selectedEntry?.path == entry.path,
-                                onClick = { selectedEntry = entry; onOpenFile(entry) },
+                                onClick = { selectedEntry = entry; imeAllowed = false; onOpenFile(entry) },
                                 onLongClick = { selectedEntry = entry; contextEntry = entry; showContextMenu = true },
                                 onToggleFavorite = { selectedEntry = entry; vm.toggleFavorite(entry) }
                             )
@@ -255,7 +268,7 @@ fun BrowserScreen(
                                 entry = entry,
                                 isFavorite = entry.path in favPaths,
                                 isSelected = selectedEntry?.path == entry.path,
-                                onClick = { selectedEntry = entry; onOpenFile(entry) },
+                                onClick = { selectedEntry = entry; imeAllowed = false; onOpenFile(entry) },
                                 onLongClick = { selectedEntry = entry; contextEntry = entry; showContextMenu = true },
                                 onToggleFavorite = { selectedEntry = entry; vm.toggleFavorite(entry) }
                             )
@@ -265,12 +278,8 @@ fun BrowserScreen(
                     item { Spacer(Modifier.height(80.dp)) }
                 }
 
-                // Invisible 1dp field that captures keyboard input.
-                // Hardware keyboard: auto-focus on first display.
-                // Virtual keyboard: focused by the keyboard icon button.
-                LaunchedEffect(Unit) {
-                    try { focusRequester.requestFocus() } catch (_: Exception) {}
-                }
+                // Invisible 1dp field that captures keyboard input for shortcuts.
+                // Focus is requested by the keyboard icon button (not auto on open).
                 BasicTextField(
                     value = shortcutBuffer,
                     onValueChange = { new ->
@@ -282,6 +291,9 @@ fun BrowserScreen(
                         .size(1.dp)
                         .alpha(0f)
                         .focusRequester(focusRequester)
+                        .onFocusChanged { fs ->
+                            if (fs.isFocused && !imeAllowed) keyboardController?.hide()
+                        }
                         .onKeyEvent { event ->
                             if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                             val ch = event.nativeKeyEvent.unicodeChar.toChar()

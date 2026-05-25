@@ -211,6 +211,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     val themeColors by vm.themeColors.collectAsStateWithLifecycle()
     val darkPref by vm.darkModePreference.collectAsStateWithLifecycle()
     val statusBar by vm.statusBar.collectAsStateWithLifecycle()
+    val fileWritable by vm.fileWritable.collectAsStateWithLifecycle()
     val snackbarMessage by vm.snackbarMessage.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -231,7 +232,15 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     var tfv by remember(currentFile?.path) { mutableStateOf(TextFieldValue(content)) }
 
     var distractionFree by rememberSaveable { mutableStateOf(false) }
+    var showReadOnlyAlert by remember { mutableStateOf(false) }
+    var showDiscardConfirm by remember { mutableStateOf(false) }
+
+    LaunchedEffect(currentFile?.path) {
+        if (!fileWritable && currentFile != null) showReadOnlyAlert = true
+    }
+
     if (distractionFree) BackHandler { distractionFree = false }
+    if (dirty && !fileWritable && !distractionFree) BackHandler { showDiscardConfirm = true }
 
     val context = LocalContext.current
     DisposableEffect(distractionFree) {
@@ -274,7 +283,8 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                     Text(
                         text = buildString {
                             append(currentFile?.name ?: "Editor")
-                            if (dirty) append(" *")
+                            if (!fileWritable) append(" [read-only]")
+                            else if (dirty) append(" *")
                         },
                         fontFamily = FontFamily.Monospace,
                         maxLines = 1
@@ -282,8 +292,11 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 },
                 navigationIcon = {
                     IconButton(onClick = {
-                        if (dirty) vm.saveFile()
-                        onBack()
+                        when {
+                            dirty && !fileWritable -> showDiscardConfirm = true
+                            dirty -> { vm.saveFile(); onBack() }
+                            else -> onBack()
+                        }
                     }) {
                         @Suppress("DEPRECATION")
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
@@ -308,7 +321,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                             Icon(Icons.Filled.List, contentDescription = "TOC")
                         }
                     }
-                    IconButton(onClick = { vm.saveFile() }, enabled = dirty) {
+                    IconButton(onClick = { vm.saveFile() }, enabled = dirty && fileWritable) {
                         Icon(Icons.Filled.Save, contentDescription = "Save")
                     }
                     IconButton(onClick = { showCmdMode = true }) {
@@ -590,6 +603,42 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
             },
             confirmButton = {
                 TextButton(onClick = { showStats = false }) { Text("Close") }
+            }
+        )
+    }
+
+    // Read-only alert
+    if (showReadOnlyAlert) {
+        AlertDialog(
+            onDismissRequest = { showReadOnlyAlert = false },
+            title = { Text("Read-only file", fontFamily = FontFamily.Monospace) },
+            text = {
+                Text(
+                    "This file cannot be saved from WrithDeck.\n\n" +
+                    "You can view and copy the content, but changes will not be persisted.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showReadOnlyAlert = false }) { Text("OK") }
+            }
+        )
+    }
+
+    // Discard confirmation (read-only + unsaved changes)
+    if (showDiscardConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDiscardConfirm = false },
+            title = { Text("Discard changes?") },
+            text = { Text("This file is read-only. Changes cannot be saved and will be lost.") },
+            confirmButton = {
+                TextButton(
+                    onClick = { showDiscardConfirm = false; onBack() },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) { Text("Discard") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDiscardConfirm = false }) { Text("Stay") }
             }
         )
     }

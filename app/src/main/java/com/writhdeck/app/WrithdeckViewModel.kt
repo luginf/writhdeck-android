@@ -98,6 +98,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     private val _timerLastTick = MutableStateFlow(0L)
     val timerLastTick = _timerLastTick.asStateFlow()
 
+    private val _fileWritable = MutableStateFlow(true)
+    val fileWritable = _fileWritable.asStateFlow()
+
     private var timerJob: Job? = null
     private var externalUri: Uri? = null
     private var externalWritable = false
@@ -115,7 +118,12 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
         config = withContext(Dispatchers.IO) {
             val iniFile = File(dd, "writhdeck.ini")
-            if (iniFile.exists()) IniParser.parse(iniFile.readText()) else AppConfig()
+            if (iniFile.exists()) IniParser.parse(iniFile.readText())
+            else {
+                val defaultConfig = AppConfig()
+                iniFile.writeText(IniParser.write(defaultConfig))
+                defaultConfig
+            }
         }
         appState = withContext(Dispatchers.IO) { StateStore.load(stateFile) }
 
@@ -220,6 +228,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             val text = withContext(Dispatchers.IO) { File(entry.path).readText() }
             externalUri = null
             externalWritable = false
+            _fileWritable.value = withContext(Dispatchers.IO) { File(entry.path).canWrite() }
             _content.value = text
             _currentFile.value = entry
             _dirty.value = false
@@ -248,6 +257,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             }
             externalUri = null
             externalWritable = false
+            _fileWritable.value = withContext(Dispatchers.IO) { iniFile.canWrite() }
             _content.value = text
             _currentFile.value = DocEntry("writhdeck.ini", iniFile.absolutePath)
             _dirty.value = false
@@ -361,16 +371,22 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             }
             val resolvedPath = withContext(Dispatchers.IO) { resolveContentUri(uri, contentResolver) }
             val name = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':') ?: "untitled.txt"
-            if (resolvedPath != null && (File(resolvedPath).canWrite() || _storagePermissionGranted.value)) {
+            // Only use direct path if we can actually write to it.
+            // Do NOT fall back to storagePermissionGranted: it does not grant write access
+            // to paths inside other apps' private directories (e.g. Termux /data/data/com.termux/).
+            val pathWritable = resolvedPath != null && withContext(Dispatchers.IO) { File(resolvedPath).canWrite() }
+            if (pathWritable) {
                 externalUri = null
                 externalWritable = false
-                _currentFile.value = DocEntry(name, resolvedPath)
+                _fileWritable.value = true
+                _currentFile.value = DocEntry(name, resolvedPath!!)
                 appState = StateStore.pushRecent(appState, resolvedPath)
                 withContext(Dispatchers.IO) { StateStore.save(stateFile, appState) }
                 refreshRecents()
             } else {
                 externalUri = uri
                 externalWritable = canWrite
+                _fileWritable.value = canWrite
                 _currentFile.value = DocEntry(name, uri.toString())
             }
             _content.value = text
@@ -426,13 +442,20 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             _snackbarMessage.value = "File is read-only"
         } else {
             viewModelScope.launch {
-                withContext(Dispatchers.IO) { File(entry.path).writeText(_content.value) }
-                _dirty.value = false
-                appState = StateStore.updateDaily(appState, entry.path, _wordCount.value, today())
-                withContext(Dispatchers.IO) { StateStore.save(stateFile, appState) }
-                if (entry.name == "writhdeck.ini") reloadConfig()
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching { File(entry.path).writeText(_content.value) }.isSuccess
+                }
+                if (ok) {
+                    _dirty.value = false
+                    appState = StateStore.updateDaily(appState, entry.path, _wordCount.value, today())
+                    withContext(Dispatchers.IO) { StateStore.save(stateFile, appState) }
+                    if (entry.name == "writhdeck.ini") reloadConfig()
+                } else {
+                    _fileWritable.value = false
+                    _snackbarMessage.value = "Cannot save: file is not writable"
+                }
+                refreshStatus()
             }
-            refreshStatus()
         }
     }
 

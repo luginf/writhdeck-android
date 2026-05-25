@@ -20,7 +20,8 @@ data class AppConfig(
     val chronoShow: Boolean = false,
     val wordGoal: Int = 0,
     val keyToc: String = "F11",
-    val docsCustomDir: String = ""
+    val docsCustomDir: String = "",
+    val activeProfile: String = "default"
 ) {
     fun schemeColors(): SchemeColors = BUILTIN_SCHEMES[scheme] ?: BUILTIN_SCHEMES["default"]!!
 
@@ -36,18 +37,43 @@ data class AppConfig(
 object IniParser {
 
     fun parse(text: String): AppConfig {
-        val keys = mutableMapOf<String, String>()
+        val global = mutableMapOf<String, String>()
+        val profiles = mutableMapOf<String, MutableMap<String, String>>()
+        var currentProfile: String? = null
+
         for (raw in text.lines()) {
             val line = raw.trim()
             if (line.startsWith("#") || line.startsWith("%") || line.isEmpty()) continue
-            if (line.startsWith("=") || line.startsWith("[")) continue
+            // WrithDeck section header:  = title =
+            if (line.startsWith("=") && line.endsWith("=") && line.length > 2) {
+                val title = line.trim('=').trim()
+                currentProfile = if (title.startsWith("profile:"))
+                    title.removePrefix("profile:").trim() else null
+                continue
+            }
+            // Standard INI section header: [section]
+            if (line.startsWith("[") && line.endsWith("]")) {
+                currentProfile = null
+                continue
+            }
             val eq = line.indexOf('=')
             if (eq < 0) continue
             val key = line.substring(0, eq).trim()
             var value = line.substring(eq + 1).trim()
             value = value.replace(Regex("\\s+[#%].*$"), "")
-            if (key.isNotEmpty()) keys[key] = value
+            if (key.isEmpty()) continue
+
+            if (currentProfile != null) {
+                profiles.getOrPut(currentProfile) { mutableMapOf() }[key] = value
+            } else {
+                global[key] = value
+            }
         }
+
+        val activeProfile = global["active_profile"]?.takeIf { it.isNotBlank() } ?: "default"
+        // Profile keys take precedence over global keys for profile-specific settings.
+        val keys = global.toMutableMap().also { it.putAll(profiles[activeProfile] ?: emptyMap()) }
+
         fun bool(k: String, def: Boolean): Boolean {
             val v = keys[k]?.lowercase() ?: return def
             return v == "yes" || v == "1" || v == "true" || v == "on"
@@ -73,20 +99,19 @@ object IniParser {
             chronoShow       = bool("chrono_show", false),
             wordGoal         = int("word_goal", 0).coerceAtLeast(0),
             keyToc           = str("key_toc", "F11"),
-            docsCustomDir    = keys["docs_dir"] ?: ""
+            docsCustomDir    = keys["docs_dir"] ?: "",
+            activeProfile    = activeProfile
         )
     }
 
     fun write(config: AppConfig): String {
         fun bool(b: Boolean) = if (b) "yes" else "no"
         return buildString {
+            appendLine("% WrithDeck — configuration")
+            appendLine("% Schemes: default solarized gruvbox everforest nord alt01 alt02 retro")
+            appendLine()
             appendLine("= editor =")
-            appendLine("scheme = ${config.scheme}")
-            appendLine("heading_marker = ${config.headingMarker}")
-            appendLine("markdown_headings = ${bool(config.markdownHeadings)}")
-            appendLine("margin_width = ${config.marginWidth}")
-            appendLine("margin_height = ${config.marginHeight}")
-            appendLine("word_goal = ${config.wordGoal}")
+            appendLine("active_profile = ${config.activeProfile}")
             appendLine()
             appendLine("= behaviour =")
             appendLine("cursor_restore = yes")
@@ -105,7 +130,25 @@ object IniParser {
             if (config.docsCustomDir.isNotEmpty()) appendLine("docs_dir = ${config.docsCustomDir}")
             appendLine()
             appendLine("= keys =")
-            append("key_toc = ${config.keyToc}")
+            appendLine("key_toc = ${config.keyToc}")
+            appendLine()
+            appendLine("= profiles =")
+            appendLine()
+            appendLine("= profile: default =")
+            appendLine("scheme = default")
+            appendLine("heading_marker = =")
+            appendLine("markdown_headings = yes")
+            appendLine("margin_width = 16")
+            appendLine("margin_height = 16")
+            appendLine("word_goal = 0")
+            appendLine()
+            appendLine("= profile: novel =")
+            appendLine("scheme = everforest")
+            appendLine("heading_marker = =")
+            appendLine("markdown_headings = no")
+            appendLine("margin_width = 32")
+            appendLine("margin_height = 24")
+            append("word_goal = 1000")
         } + "\n"
     }
 
