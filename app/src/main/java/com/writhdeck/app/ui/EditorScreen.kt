@@ -11,12 +11,15 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Title
+import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -206,18 +209,26 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     val timerType by vm.timerType.collectAsStateWithLifecycle()
 
     val themeColors by vm.themeColors.collectAsStateWithLifecycle()
+    val darkPref by vm.darkModePreference.collectAsStateWithLifecycle()
     val statusBar by vm.statusBar.collectAsStateWithLifecycle()
-    val bgColor  = remember(themeColors.bg)           { parseHexColor(themeColors.bg) }
-    val fgColor  = remember(themeColors.fg)           { parseHexColor(themeColors.fg) }
-    val hdColor  = remember(themeColors.headingColor) { parseHexColor(themeColors.headingColor) }
+    val snackbarMessage by vm.snackbarMessage.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(snackbarMessage) {
+        val msg = snackbarMessage
+        if (msg != null) {
+            snackbarHostState.showSnackbar(msg)
+            vm.dismissSnackbar()
+        }
+    }
+    val bgColor = parseHexColor(themeColors.bg)
+    val fgColor = parseHexColor(themeColors.fg)
+    val hdColor = parseHexColor(themeColors.headingColor)
 
     val colorScheme = MaterialTheme.colorScheme
     val scope = rememberCoroutineScope()
 
-    var tfv by remember { mutableStateOf(TextFieldValue(content)) }
-    LaunchedEffect(content) {
-        if (content != tfv.text) tfv = TextFieldValue(content)
-    }
+    var tfv by remember(currentFile?.path) { mutableStateOf(TextFieldValue(content)) }
 
     var distractionFree by rememberSaveable { mutableStateOf(false) }
     if (distractionFree) BackHandler { distractionFree = false }
@@ -279,6 +290,19 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                     }
                 },
                 actions = {
+                    val darkModeIcon = when (darkPref) {
+                        "yes" -> Icons.Filled.DarkMode
+                        "no"  -> Icons.Filled.LightMode
+                        else  -> Icons.Outlined.DarkMode
+                    }
+                    val nextDarkPref = when (darkPref) {
+                        "auto" -> "yes"
+                        "yes"  -> "no"
+                        else   -> "auto"
+                    }
+                    IconButton(onClick = { vm.setDarkModePreference(nextDarkPref) }) {
+                        Icon(darkModeIcon, contentDescription = "Dark mode: $darkPref")
+                    }
                     if (toc.isNotEmpty()) {
                         IconButton(onClick = { showToc = true }) {
                             Icon(Icons.Filled.List, contentDescription = "TOC")
@@ -296,6 +320,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 }
             )
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             if (!distractionFree) Surface(tonalElevation = 2.dp) {
                 Row(
@@ -331,8 +356,11 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
             }
         }
     ) { padding ->
-        val editorBg = if (bgColor != Color.Unspecified) bgColor else colorScheme.background
-        val editorFg = if (fgColor != Color.Unspecified) fgColor else colorScheme.onSurface
+        // Use INI colors when both are valid (they form a pair from the same scheme).
+        // Fall back to Material3 if either is unresolved to avoid mixing a dark bg with a light fg.
+        val hasTclColors = bgColor != Color.Unspecified && fgColor != Color.Unspecified
+        val editorBg = if (hasTclColors) bgColor else colorScheme.background
+        val editorFg = if (hasTclColors) fgColor else colorScheme.onSurface
         Box(
             modifier = Modifier
                 .fillMaxSize()

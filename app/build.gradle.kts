@@ -7,13 +7,15 @@ plugins {
 // Copy Tcl engine modules from the parent src/ directory into assets at build time.
 // boot-android.tcl stays in assets/tcl/ and is committed; state.tcl + config.tcl
 // are generated from the parent source tree so they stay in sync automatically.
+val writhdeckSrc = "${rootProject.rootDir.parent}/writhdeck/src"
+
 val copyTclModules = tasks.register<Copy>("copyTclModules") {
-    // WrithDeck engine modules from parent src/
-    from("${rootProject.rootDir.parent}/src") {
+    // WrithDeck engine modules from sibling writhdeck/src/
+    from(writhdeckSrc) {
         include("state.tcl", "config.tcl")
     }
     // Color scheme definitions — needed so ini-save produces a complete ini with all scheme colors
-    from("${rootProject.rootDir.parent}/src/schemes") {
+    from("$writhdeckSrc/schemes") {
         include("*.tcl")
         into("schemes")
     }

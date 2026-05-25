@@ -1,20 +1,33 @@
 package com.writhdeck.app.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -39,9 +52,11 @@ fun BrowserScreen(
     val storageGranted by vm.storagePermissionGranted.collectAsStateWithLifecycle()
     val engineReady by vm.engineReady.collectAsStateWithLifecycle()
     val snackbarMessage by vm.snackbarMessage.collectAsStateWithLifecycle()
+    val darkPref by vm.darkModePreference.collectAsStateWithLifecycle()
 
     var showNewDialog by remember { mutableStateOf(false) }
     var newFileName by remember { mutableStateOf("") }
+    var permissionBannerDismissed by remember { mutableStateOf(false) }
 
     var contextEntry by remember { mutableStateOf<DocEntry?>(null) }
     var showContextMenu by remember { mutableStateOf(false) }
@@ -49,6 +64,9 @@ fun BrowserScreen(
     var renameValue by remember { mutableStateOf("") }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showInfoDialog by remember { mutableStateOf(false) }
+
+    // Entry highlighted by the last tap — used for keyboard shortcuts
+    var selectedEntry by remember { mutableStateOf<DocEntry?>(null) }
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -65,11 +83,54 @@ fun BrowserScreen(
         derivedStateOf { recentDocs.filter { r -> r.path !in favPaths } }
     }
 
+    // Keyboard shortcut support (hardware keyboard + virtual keyboard via icon)
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    var shortcutBuffer by remember { mutableStateOf(TextFieldValue("")) }
+
+    fun handleShortcut(ch: Char) {
+        shortcutBuffer = TextFieldValue("")
+        when (ch.lowercaseChar()) {
+            'n' -> showNewDialog = true
+            'c' -> vm.openIniFile()
+            'f' -> selectedEntry?.let { vm.toggleFavorite(it) }
+            'r' -> selectedEntry?.let {
+                contextEntry = it
+                renameValue = it.name.substringBeforeLast('.')
+                showRenameDialog = true
+            }
+            'd' -> selectedEntry?.let { contextEntry = it; showDeleteConfirm = true }
+            'b' -> selectedEntry?.let { vm.backupFile(it) }
+            else -> {}
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("WrithDeck", fontFamily = FontFamily.Monospace) },
                 actions = {
+                    // Dark mode toggle: auto -> yes -> no -> auto
+                    val darkModeIcon = when (darkPref) {
+                        "yes" -> Icons.Filled.DarkMode
+                        "no"  -> Icons.Filled.LightMode
+                        else  -> Icons.Outlined.DarkMode
+                    }
+                    val nextDarkPref = when (darkPref) {
+                        "auto" -> "yes"
+                        "yes"  -> "no"
+                        else   -> "auto"
+                    }
+                    IconButton(onClick = { vm.setDarkModePreference(nextDarkPref) }) {
+                        Icon(darkModeIcon, contentDescription = "Dark mode: $darkPref")
+                    }
+                    // Virtual keyboard toggle — brings up keyboard for shortcut input
+                    IconButton(onClick = {
+                        try { focusRequester.requestFocus() } catch (_: Exception) {}
+                        keyboardController?.show()
+                    }) {
+                        Icon(Icons.Default.Keyboard, contentDescription = "Keyboard shortcuts")
+                    }
                     IconButton(onClick = { vm.openIniFile() }) {
                         Icon(Icons.Default.Settings, contentDescription = "Config")
                     }
@@ -88,97 +149,145 @@ fun BrowserScreen(
                 CircularProgressIndicator()
             }
         } else {
-            LazyColumn(
-                contentPadding = padding,
-                modifier = Modifier.fillMaxSize()
-            ) {
-                // Storage permission banner
-                if (!storageGranted) {
-                    item {
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 8.dp),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer
-                            )
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    "Grant storage access to store files in Documents/WrithDeck/",
-                                    modifier = Modifier.weight(1f),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+            Box(Modifier.fillMaxSize().padding(padding)) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    // Storage permission banner
+                    if (!storageGranted && !permissionBannerDismissed) {
+                        item {
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer
                                 )
-                                Spacer(Modifier.width(8.dp))
-                                TextButton(onClick = onRequestPermission) { Text("Grant") }
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                                ) {
+                                    Text(
+                                        "Storage access",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        "Without permission: files are stored in private internal storage (not visible in file manager).",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.End
+                                    ) {
+                                        TextButton(onClick = { permissionBannerDismissed = true }) {
+                                            Text("Keep private")
+                                        }
+                                        Spacer(Modifier.width(8.dp))
+                                        Button(onClick = onRequestPermission) {
+                                            Text("Grant access")
+                                        }
+                                    }
+                                    Text(
+                                        "Grant access: stores files in Documents/WrithDeck/ and allows opening/saving files anywhere on the device.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
+                                    )
+                                }
                             }
                         }
                     }
-                }
 
-                // Favorites section
-                if (favoriteDocs.isNotEmpty()) {
-                    item { SectionHeader("Favorites") }
-                    items(favoriteDocs, key = { "fav_${it.path}" }) { entry ->
-                        DocListItem(
-                            entry = entry,
-                            isFavorite = true,
-                            onClick = { onOpenFile(entry) },
-                            onLongClick = { contextEntry = entry; showContextMenu = true },
-                            onToggleFavorite = { vm.toggleFavorite(entry) }
-                        )
-                    }
-                }
-
-                // Documents section
-                item { SectionHeader("Documents") }
-                if (docs.isEmpty()) {
-                    item {
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                            contentAlignment = Alignment.CenterStart
-                        ) {
-                            Text(
-                                "No documents yet. Tap + to create one.",
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                    // Favorites section
+                    if (favoriteDocs.isNotEmpty()) {
+                        item { SectionHeader("Favorites") }
+                        items(favoriteDocs, key = { "fav_${it.path}" }) { entry ->
+                            DocListItem(
+                                entry = entry,
+                                isFavorite = true,
+                                isSelected = selectedEntry?.path == entry.path,
+                                onClick = { selectedEntry = entry; onOpenFile(entry) },
+                                onLongClick = { selectedEntry = entry; contextEntry = entry; showContextMenu = true },
+                                onToggleFavorite = { selectedEntry = entry; vm.toggleFavorite(entry) }
                             )
                         }
                     }
-                } else {
-                    items(docs, key = { it.path }) { entry ->
-                        DocListItem(
-                            entry = entry,
-                            isFavorite = entry.path in favPaths,
-                            onClick = { onOpenFile(entry) },
-                            onLongClick = { contextEntry = entry; showContextMenu = true },
-                            onToggleFavorite = { vm.toggleFavorite(entry) }
-                        )
+
+                    // Documents section
+                    item { SectionHeader("Documents") }
+                    if (docs.isEmpty()) {
+                        item {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                Text(
+                                    "No documents yet. Tap + to create one.",
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    } else {
+                        items(docs, key = { it.path }) { entry ->
+                            DocListItem(
+                                entry = entry,
+                                isFavorite = entry.path in favPaths,
+                                isSelected = selectedEntry?.path == entry.path,
+                                onClick = { selectedEntry = entry; onOpenFile(entry) },
+                                onLongClick = { selectedEntry = entry; contextEntry = entry; showContextMenu = true },
+                                onToggleFavorite = { selectedEntry = entry; vm.toggleFavorite(entry) }
+                            )
+                        }
                     }
+
+                    // Recent section
+                    if (recentOnly.isNotEmpty()) {
+                        item { SectionHeader("Recent") }
+                        items(recentOnly, key = { "recent_${it.path}" }) { entry ->
+                            DocListItem(
+                                entry = entry,
+                                isFavorite = entry.path in favPaths,
+                                isSelected = selectedEntry?.path == entry.path,
+                                onClick = { selectedEntry = entry; onOpenFile(entry) },
+                                onLongClick = { selectedEntry = entry; contextEntry = entry; showContextMenu = true },
+                                onToggleFavorite = { selectedEntry = entry; vm.toggleFavorite(entry) }
+                            )
+                        }
+                    }
+
+                    item { Spacer(Modifier.height(80.dp)) }
                 }
 
-                // Recent section
-                if (recentOnly.isNotEmpty()) {
-                    item { SectionHeader("Recent") }
-                    items(recentOnly, key = { "recent_${it.path}" }) { entry ->
-                        DocListItem(
-                            entry = entry,
-                            isFavorite = entry.path in favPaths,
-                            onClick = { onOpenFile(entry) },
-                            onLongClick = { contextEntry = entry; showContextMenu = true },
-                            onToggleFavorite = { vm.toggleFavorite(entry) }
-                        )
-                    }
+                // Invisible 1dp field that captures keyboard input.
+                // Hardware keyboard: auto-focus on first display.
+                // Virtual keyboard: focused by the keyboard icon button.
+                LaunchedEffect(Unit) {
+                    try { focusRequester.requestFocus() } catch (_: Exception) {}
                 }
-
-                item { Spacer(Modifier.height(80.dp)) }
+                BasicTextField(
+                    value = shortcutBuffer,
+                    onValueChange = { new ->
+                        val ch = new.text.lastOrNull()
+                        shortcutBuffer = TextFieldValue("")
+                        if (ch != null && ch.isLetter()) handleShortcut(ch)
+                    },
+                    modifier = Modifier
+                        .size(1.dp)
+                        .alpha(0f)
+                        .focusRequester(focusRequester)
+                        .onKeyEvent { event ->
+                            if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                            val ch = event.nativeKeyEvent.unicodeChar.toChar()
+                            if (ch.isLetter()) { handleShortcut(ch); true } else false
+                        }
+                )
             }
         }
     }
@@ -383,27 +492,39 @@ private fun SectionHeader(title: String) {
 private fun DocListItem(
     entry: DocEntry,
     isFavorite: Boolean,
+    isSelected: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onToggleFavorite: () -> Unit
 ) {
-    ListItem(
-        headlineContent = { Text(entry.name, fontFamily = FontFamily.Monospace) },
-        trailingContent = {
-            IconButton(onClick = onToggleFavorite, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    Icons.Default.Star,
-                    contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
-                    tint = if (isFavorite) MaterialTheme.colorScheme.primary
-                           else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-        },
-        modifier = Modifier.combinedClickable(
-            onClick = onClick,
-            onLongClick = onLongClick
+    val bg = if (isSelected) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
+             else Color.Transparent
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(bg)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = entry.name,
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f).padding(vertical = 8.dp)
         )
-    )
+        IconButton(
+            onClick = onToggleFavorite,
+            modifier = Modifier.size(44.dp)
+        ) {
+            Icon(
+                Icons.Default.Star,
+                contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
+                tint = if (isFavorite) MaterialTheme.colorScheme.primary
+                       else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
     HorizontalDivider()
 }

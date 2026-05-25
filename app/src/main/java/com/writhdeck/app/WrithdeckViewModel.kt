@@ -4,9 +4,11 @@ import android.Manifest
 import android.app.Application
 import android.content.ContentResolver
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.DocumentsContract
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -24,8 +26,8 @@ data class StatEntry(val date: String, val words: Int)
 data class StatusBar(val left: String = "", val center: String = "", val right: String = "")
 data class ThemeColors(
     val bg: String = "#1a1a1a",
-    val fg: String = "#d4cfbf",
-    val headingColor: String = "#87ceeb"
+    val fg: String = "#e8e8e8",
+    val headingColor: String = "#c8a060"
 )
 
 class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
@@ -84,6 +86,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     private val _themeColors = MutableStateFlow(ThemeColors())
     val themeColors = _themeColors.asStateFlow()
 
+    private val _darkModePreference = MutableStateFlow("auto")
+    val darkModePreference = _darkModePreference.asStateFlow()
+
     private val _statusBar = MutableStateFlow(StatusBar())
     val statusBar = _statusBar.asStateFlow()
     private val _timerActive = MutableStateFlow(false)
@@ -109,13 +114,17 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         val dd = docsDir.also { it.mkdirs() }
         engine.init(dd.absolutePath)
         _engineReady.value = true
-        _headingMarker.value = engine.eval("set ::cfg_heading_marker").trim().ifEmpty { "=" }
-        _markdownHeadings.value = engine.eval("set ::cfg_markdown_headings").trim() != "0"
-        _keyToc.value = engine.eval("set ::cfg_key_toc").trim().ifEmpty { "F11" }
-        _timerType.value = engine.eval("set ::cfg_timer_type").trim().ifEmpty { "countdown" }
-        _marginWidth.value = engine.eval("set ::cfg_margin_width").trim().toIntOrNull() ?: 60
-        _marginHeight.value = engine.eval("set ::cfg_margin_height").trim().toIntOrNull() ?: 40
+        fun String.singleWord() = trim().takeIf { it.isNotBlank() && !it.contains(' ') }
+        _headingMarker.value = engine.eval("set ::cfg_heading_marker").singleWord() ?: "="
+        _markdownHeadings.value = engine.eval("set ::cfg_markdown_headings").trim().let { it == "1" || it == "yes" || it == "true" }
+        _keyToc.value = engine.eval("set ::cfg_key_toc").singleWord() ?: "F11"
+        _timerType.value = engine.eval("set ::cfg_timer_type").trim().let { if (it == "stopwatch") "stopwatch" else "countdown" }
+        // Cap margins: desktop uses pixels, Android uses dp — clamp to usable phone dimensions
+        _marginWidth.value = (engine.eval("set ::cfg_margin_width").trim().toIntOrNull() ?: 16).coerceIn(0, 48)
+        _marginHeight.value = (engine.eval("set ::cfg_margin_height").trim().toIntOrNull() ?: 16).coerceIn(0, 32)
         applyTimerState(engine.eval("android-timer-state"), resetLastTick = true)
+        _darkModePreference.value = engine.eval("set ::cfg_android_dark_mode").trim()
+            .let { if (it == "auto" || it == "yes" || it == "no") it else "auto" }
         _themeColors.value = loadThemeColors()
         refreshDocs()
         refreshFavorites()
@@ -165,22 +174,50 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             if (!_engineReady.value) return@launch
             val raw = withContext(Dispatchers.Default) {
-                engine.eval("join \$::state_favorites \"\n\"")
+                engine.eval("join \$::favorites_list \"\n\"")
             }
             val entries = raw.lines()
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
                 .mapNotNull { path ->
                     val f = File(path)
-                    if (f.exists() && f.canRead()) DocEntry(f.name, f.absolutePath) else null
+                    if (f.exists()) DocEntry(f.name, f.absolutePath) else null
                 }
             _favoriteDocs.value = entries
+        }
+    }
+
+    fun setDarkModePreference(pref: String) {
+        viewModelScope.launch {
+            if (!_engineReady.value) return@launch
+            val useDark = when (pref) {
+                "yes" -> true
+                "no"  -> false
+                else  -> isSystemDarkMode()
+            }
+            // Write dark_mode + android_dark_mode to INI so they persist across restarts
+            engine.eval("""
+                set ::cfg_dark_mode ${if (useDark) 1 else 0}
+                set ::cfg_android_dark_mode $pref
+                ini-save
+            """.trimIndent())
+            val colors = loadThemeColors(pref = pref)
+            _darkModePreference.value = pref
+            _themeColors.value = colors
+        }
+    }
+
+    fun updateThemeColors(systemDark: Boolean) {
+        viewModelScope.launch {
+            _themeColors.value = loadThemeColors(systemDark = systemDark, pref = _darkModePreference.value)
         }
     }
 
     fun openFile(entry: DocEntry) {
         viewModelScope.launch {
             val text = withContext(Dispatchers.IO) { File(entry.path).readText() }
+            externalUri = null
+            externalWritable = false
             _content.value = text
             _currentFile.value = entry
             _dirty.value = false
@@ -200,6 +237,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 docsDir.mkdirs()
                 engine.eval("ini-save")
             }
+            externalUri = null
+            externalWritable = false
             val text = withContext(Dispatchers.IO) {
                 if (iniFile.exists()) iniFile.readText() else ""
             }
@@ -215,7 +254,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             if (!_engineReady.value) return@launch
             val raw = withContext(Dispatchers.Default) {
-                engine.eval("join \$::state_recent \"\n\"")
+                engine.eval("join \$::recent_list \"\n\"")
             }
             val entries = raw.lines()
                 .map { it.trim() }
@@ -263,7 +302,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 engine.setVar("::android_new", dst.absolutePath)
                 engine.eval("""
                     recent-rename ${'$'}::android_old ${'$'}::android_new
-                    if {[lsearch -exact ${'$'}::state_favorites ${'$'}::android_old] >= 0} {
+                    if {[lsearch -exact ${'$'}::favorites_list ${'$'}::android_old] >= 0} {
                         toggle-favorite ${'$'}::android_old
                         toggle-favorite ${'$'}::android_new
                     }
@@ -286,7 +325,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 engine.setVar("::android_del", entry.path)
                 engine.eval("""
                     recent-remove ${'$'}::android_del
-                    if {[lsearch -exact ${'$'}::state_favorites ${'$'}::android_del] >= 0} {
+                    if {[lsearch -exact ${'$'}::favorites_list ${'$'}::android_del] >= 0} {
                         toggle-favorite ${'$'}::android_del
                     }
                     state-save
@@ -334,14 +373,62 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             val text = withContext(Dispatchers.IO) {
                 contentResolver.openInputStream(uri)?.use { it.bufferedReader().readText() } ?: ""
             }
-            externalUri = uri
-            externalWritable = canWrite
-            val name = uri.lastPathSegment?.substringAfterLast('/') ?: "untitled.txt"
-            _currentFile.value = DocEntry(name, uri.toString())
+            // Try to resolve to a real file path so we can write with MANAGE_EXTERNAL_STORAGE
+            val resolvedPath = withContext(Dispatchers.IO) { resolveContentUri(uri, contentResolver) }
+            val name = uri.lastPathSegment?.substringAfterLast('/')
+                ?.substringAfterLast(':') ?: "untitled.txt"
+            if (resolvedPath != null && (File(resolvedPath).canWrite() || _storagePermissionGranted.value)) {
+                externalUri = null
+                externalWritable = false
+                _currentFile.value = DocEntry(name, resolvedPath)
+                if (_engineReady.value) {
+                    engine.eval("recent-push {$resolvedPath}")
+                    refreshRecents()
+                }
+            } else {
+                externalUri = uri
+                externalWritable = canWrite
+                _currentFile.value = DocEntry(name, uri.toString())
+            }
             _content.value = text
             _dirty.value = false
             _wordCount.value = countWords(text)
         }
+    }
+
+    private fun resolveContentUri(uri: Uri, cr: ContentResolver): String? {
+        if (uri.scheme == "file") return uri.path
+        // ExternalStorageProvider (most file managers on Android)
+        if (uri.authority == "com.android.externalstorage.documents") {
+            return try {
+                val docId = DocumentsContract.getDocumentId(uri)
+                val colon = docId.indexOf(':')
+                if (colon < 0) return null
+                val storageType = docId.substring(0, colon)
+                val path = docId.substring(colon + 1)
+                if (storageType.equals("primary", ignoreCase = true))
+                    "${Environment.getExternalStorageDirectory().absolutePath}/$path"
+                else
+                    "/storage/$storageType/$path"
+            } catch (_: Exception) { null }
+        }
+        // File provider wrapping a file:// URI (Material Files: me.zhanghai.android.files.file.provider)
+        // Their content URI path contains a URL-encoded "file:///..." segment
+        try {
+            val decoded = Uri.decode(uri.toString())
+            val fileIdx = decoded.indexOf("file:///")
+            if (fileIdx >= 0) {
+                val path = decoded.substring(fileIdx + 7) // after "file://" → "/absolute/path"
+                val f = File(path)
+                if (f.exists()) return f.absolutePath
+            }
+        } catch (_: Exception) {}
+        // Fallback: _data column (MediaStore and some legacy providers)
+        return try {
+            cr.query(uri, arrayOf("_data"), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        } catch (_: Exception) { null }
     }
 
     fun saveFile() {
@@ -357,7 +444,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 _dirty.value = false
             }
-        } else if (uri == null) {
+        } else if (uri != null) {
+            _snackbarMessage.value = "File is read-only"
+        } else {
             viewModelScope.launch {
                 withContext(Dispatchers.IO) { File(entry.path).writeText(_content.value) }
                 _dirty.value = false
@@ -372,12 +461,15 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun reloadConfig() {
         withContext(Dispatchers.Default) { engine.eval("ini-load\nkeys-init") }
-        _headingMarker.value = engine.eval("set ::cfg_heading_marker").trim().ifEmpty { "=" }
-        _markdownHeadings.value = engine.eval("set ::cfg_markdown_headings").trim() != "0"
-        _keyToc.value = engine.eval("set ::cfg_key_toc").trim().ifEmpty { "F11" }
-        _timerType.value = engine.eval("set ::cfg_timer_type").trim().ifEmpty { "countdown" }
-        _marginWidth.value = engine.eval("set ::cfg_margin_width").trim().toIntOrNull() ?: 60
-        _marginHeight.value = engine.eval("set ::cfg_margin_height").trim().toIntOrNull() ?: 40
+        fun String.singleWord() = trim().takeIf { it.isNotBlank() && !it.contains(' ') }
+        _headingMarker.value = engine.eval("set ::cfg_heading_marker").singleWord() ?: "="
+        _markdownHeadings.value = engine.eval("set ::cfg_markdown_headings").trim().let { it == "1" || it == "yes" || it == "true" }
+        _keyToc.value = engine.eval("set ::cfg_key_toc").singleWord() ?: "F11"
+        _timerType.value = engine.eval("set ::cfg_timer_type").trim().let { if (it == "stopwatch") "stopwatch" else "countdown" }
+        _marginWidth.value = (engine.eval("set ::cfg_margin_width").trim().toIntOrNull() ?: 16).coerceIn(0, 48)
+        _marginHeight.value = (engine.eval("set ::cfg_margin_height").trim().toIntOrNull() ?: 16).coerceIn(0, 32)
+        _darkModePreference.value = engine.eval("set ::cfg_android_dark_mode").trim()
+            .let { if (it == "auto" || it == "yes" || it == "no") it else "auto" }
         _themeColors.value = loadThemeColors()
         refreshStatus()
     }
@@ -402,11 +494,34 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun loadThemeColors(): ThemeColors {
-        val raw = engine.eval("android-get-theme").trim()
+    private fun isSystemDarkMode(): Boolean {
+        val flags = getApplication<Application>().resources.configuration.uiMode and
+                    Configuration.UI_MODE_NIGHT_MASK
+        return flags == Configuration.UI_MODE_NIGHT_YES
+    }
+
+    private suspend fun loadThemeColors(
+        systemDark: Boolean = isSystemDarkMode(),
+        pref: String = _darkModePreference.value
+    ): ThemeColors {
+        val useDark = when (pref) {
+            "yes" -> true
+            "no"  -> false
+            else  -> systemDark
+        }
+        val bgVar  = if (useDark) "::cfg_bg"             else "::cfg_bg_alt"
+        val fgVar  = if (useDark) "::cfg_fg"             else "::cfg_fg_alt"
+        val hdVar  = if (useDark) "::cfg_color_heading"  else "::cfg_color_heading_alt"
+        // One atomic eval: set dark mode flag + read the three color variables
+        val raw = engine.eval("""
+            set ::cfg_dark_mode ${if (useDark) 1 else 0}
+            list [set $bgVar] [set $fgVar] [set $hdVar]
+        """.trimIndent()).trim()
+        android.util.Log.d("WrithdeckTheme", "loadThemeColors pref=$pref useDark=$useDark raw='$raw'")
         val parts = raw.split(Regex("\\s+"))
         if (parts.size >= 3 && parts[0].startsWith("#"))
             return ThemeColors(bg = parts[0], fg = parts[1], headingColor = parts[2])
+        android.util.Log.w("WrithdeckTheme", "color vars returned unexpected: '$raw'")
         return ThemeColors()
     }
 

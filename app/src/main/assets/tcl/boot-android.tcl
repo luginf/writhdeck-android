@@ -143,6 +143,20 @@ proc android-word-occurrences {text} {
     return $out
 }
 
+# ── Favorites (toggle-favorite lives in common.tcl which is not sourced here) ─
+
+proc toggle-favorite {path} {
+    # No file normalize: on Android, /storage/emulated/0/ resolves to /data/media/0/ (unreadable)
+    if {!$::state_cache_valid} { state-load }
+    set idx [lsearch -exact $::favorites_list $path]
+    if {$idx >= 0} {
+        set ::favorites_list [lreplace $::favorites_list $idx $idx]
+    } else {
+        lappend ::favorites_list $path
+    }
+    state-save
+}
+
 # ── Status bar (mirrors status-build from common.tcl) ────────────────────────
 
 proc _android_status_tok {tok words filename dirty timer_val clk} {

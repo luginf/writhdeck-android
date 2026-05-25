@@ -12,7 +12,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import com.writhdeck.app.ui.AppNavigation
 
 class MainActivity : ComponentActivity() {
@@ -30,7 +36,15 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         handleIntent(intent)
         setContent {
-            MaterialTheme {
+            val darkPref by vm.darkModePreference.collectAsState()
+            val systemDark = isSystemInDarkTheme()
+            val useDark = when (darkPref) {
+                "yes" -> true
+                "no"  -> false
+                else  -> systemDark
+            }
+            LaunchedEffect(systemDark) { vm.updateThemeColors(systemDark) }
+            MaterialTheme(colorScheme = if (useDark) darkColorScheme() else lightColorScheme()) {
                 AppNavigation(vm = vm, onRequestPermission = ::requestStoragePermission)
             }
         }

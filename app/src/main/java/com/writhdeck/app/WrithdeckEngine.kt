@@ -1,11 +1,18 @@
 package com.writhdeck.app
 
 import android.content.Context
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.Executors
 
 class WrithdeckEngine(private val context: Context) {
+
+    // Tcl interpreter must always run on the same OS thread (TLS state).
+    // limitedParallelism(1) serializes but may use different IO threads;
+    // a single-thread executor guarantees thread affinity.
+    private val tclExecutor = Executors.newSingleThreadExecutor()
+    private val tclDispatcher = tclExecutor.asCoroutineDispatcher()
 
     external fun nativeInit(filesDir: String): Boolean
     external fun nativeEval(script: String): String
@@ -31,7 +38,7 @@ class WrithdeckEngine(private val context: Context) {
 
     suspend fun init(docsDir: String): Boolean {
         if (!available) return false
-        return withContext(Dispatchers.IO) {
+        return withContext(tclDispatcher) {
             copyAssetsToFilesDir()
             val ok = nativeInit(context.filesDir.absolutePath)
             if (ok) {
@@ -46,17 +53,18 @@ class WrithdeckEngine(private val context: Context) {
         }
     }
 
-    suspend fun eval(script: String): String = withContext(Dispatchers.IO) {
+    suspend fun eval(script: String): String = withContext(tclDispatcher) {
         if (!available) "ERROR: native library not loaded"
         else nativeEval(script)
     }
 
-    suspend fun setVar(name: String, value: String) = withContext(Dispatchers.IO) {
+    suspend fun setVar(name: String, value: String) = withContext(tclDispatcher) {
         if (available) nativeSetVar(name, value)
     }
 
     fun destroy() {
         if (available) nativeDestroy()
+        tclExecutor.shutdown()
     }
 
     // Copy assets/tcl/** to filesDir/tcl/** on first install or update
