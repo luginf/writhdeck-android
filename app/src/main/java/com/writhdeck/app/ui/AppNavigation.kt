@@ -30,8 +30,15 @@ fun AppNavigation(vm: WrithdeckViewModel = viewModel(), onRequestPermission: () 
                     vm.openFile(entry)
                     nav.navigate("editor") { launchSingleTop = true }
                 },
+                onOpenScratchpad = {
+                    vm.openScratchpad()
+                    nav.navigate("editor") { launchSingleTop = true }
+                },
                 onNavigateSchemes = {
                     nav.navigate("schemes") { launchSingleTop = true }
+                },
+                onNavigateSettings = {
+                    nav.navigate("settings") { launchSingleTop = true }
                 },
                 onRequestPermission = onRequestPermission
             )
@@ -44,6 +51,16 @@ fun AppNavigation(vm: WrithdeckViewModel = viewModel(), onRequestPermission: () 
         }
         composable("schemes") {
             SchemeConfigScreen(vm = vm, onBack = { nav.popBackStack() })
+        }
+        composable("settings") {
+            SettingsScreen(
+                vm = vm,
+                onBack = { nav.popBackStack() },
+                onEditIni = {
+                    vm.openIniFile()
+                    nav.navigate("editor") { launchSingleTop = true }
+                }
+            )
         }
     }
 }

@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.ContentResolver
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -27,6 +28,34 @@ import java.util.Locale
 data class DocEntry(val name: String, val path: String)
 data class StatEntry(val date: String, val words: Int)
 data class StatusBar(val left: String = "", val center: String = "", val right: String = "")
+
+data class WsSnapshot(
+    val file: DocEntry?,
+    val content: String,
+    val dirty: Boolean,
+    val wordCount: Int,
+    val writable: Boolean,
+    val extUri: Uri?,
+    val extWritable: Boolean,
+    val cursorOffset: Int
+) {
+    companion object { fun empty() = WsSnapshot(null, "", false, 0, true, null, false, 0) }
+}
+
+data class SettingsData(
+    val fontSize: Int = 16,
+    val marginWidth: Int = 16,
+    val marginHeight: Int = 16,
+    val wordGoal: Int = 0,
+    val headingMarker: String = "=",
+    val autosaveEnabled: Boolean = true,
+    val autosaveInterval: Int = 1,
+    val timerType: String = "countdown",
+    val timerDuration: Int = 25,
+    val timerSound: Boolean = false,
+    val timerAlert: Boolean = false,
+    val chronoShow: Boolean = false
+)
 
 class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -79,6 +108,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     val marginWidth = _marginWidth.asStateFlow()
     private val _marginHeight = MutableStateFlow(16)
     val marginHeight = _marginHeight.asStateFlow()
+    private val _fontSize = MutableStateFlow(16)
+    val fontSize = _fontSize.asStateFlow()
 
     private val _timerType = MutableStateFlow("countdown")
     val timerType = _timerType.asStateFlow()
@@ -97,6 +128,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     val timerRemaining = _timerRemaining.asStateFlow()
     private val _timerLastTick = MutableStateFlow(0L)
     val timerLastTick = _timerLastTick.asStateFlow()
+    private val _timerAlertPending = MutableStateFlow(false)
+    val timerAlertPending = _timerAlertPending.asStateFlow()
 
     private val _fileWritable = MutableStateFlow(true)
     val fileWritable = _fileWritable.asStateFlow()
@@ -107,12 +140,26 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     private val _activeScheme = MutableStateFlow("default")
     val activeScheme = _activeScheme.asStateFlow()
 
-    private var timerJob: Job? = null
-    private var externalUri: Uri? = null
-    private var externalWritable = false
+    // Cursor restore: set before currentFile changes so remember(path, wsActive) picks it up.
+    private val _initialCursorOffset = MutableStateFlow(0)
+    val initialCursorOffset = _initialCursorOffset.asStateFlow()
+
+    // Workspace
+    private val _wsActive = MutableStateFlow(1)
+    val wsActive = _wsActive.asStateFlow()
+    private val _wsDualMode = MutableStateFlow(false)
+    val wsDualMode = _wsDualMode.asStateFlow()
+
+    private var ws1Snap = WsSnapshot.empty()
+    private var ws2Snap = WsSnapshot.empty()
 
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage = _snackbarMessage.asStateFlow()
+
+    private var timerJob: Job? = null
+    private var autosaveJob: Job? = null
+    private var externalUri: Uri? = null
+    private var externalWritable = false
 
     init {
         viewModelScope.launch { initApp() }
@@ -152,10 +199,12 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _timerType.value = config.timerType
         _marginWidth.value = config.marginWidth
         _marginHeight.value = config.marginHeight
+        _fontSize.value = config.fontSize
         _darkModePreference.value = config.androidDarkMode
         _customSchemes.value = config.customSchemes
         _activeScheme.value = config.scheme
         _themeColors.value = config.themeColors(resolveUseDark())
+        restartAutosave()
     }
 
     private fun resolveUseDark(): Boolean = when (config.androidDarkMode) {
@@ -163,6 +212,35 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         "no"  -> false
         else  -> isSystemDarkMode()
     }
+
+    // --- Autosave ---
+
+    private fun restartAutosave() {
+        autosaveJob?.cancel()
+        autosaveJob = null
+        if (!config.autosaveEnabled) return
+        val intervalMs = config.autosaveInterval.coerceAtLeast(1).toLong() * 60_000L
+        autosaveJob = viewModelScope.launch {
+            while (true) {
+                delay(intervalMs)
+                doAutosave()
+            }
+        }
+    }
+
+    private suspend fun doAutosave() {
+        if (!_dirty.value) return
+        val content = _content.value
+        val name = _currentFile.value?.name ?: return
+        val ws = _wsActive.value
+        val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+        val text = "$name\n$ts\n\n-------------------------\n$content"
+        withContext(Dispatchers.IO) {
+            try { File(docsDir, "autosave_ws0$ws.txt").writeText(text) } catch (_: Exception) {}
+        }
+    }
+
+    // --- Storage permission ---
 
     fun onStoragePermissionGranted() {
         if (_storagePermissionGranted.value) return
@@ -179,6 +257,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             }
             _engineReady.value = false
             timerJob?.cancel(); timerJob = null
+            autosaveJob?.cancel(); autosaveJob = null
             initApp()
             _snackbarMessage.value = "Documents stored in Documents/writhdeck/"
         }
@@ -238,6 +317,10 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             externalWritable = false
             _fileWritable.value = withContext(Dispatchers.IO) { File(entry.path).canWrite() }
             _content.value = text
+            // Restore cursor — set before currentFile so remember(path, wsActive) sees it
+            val cursor = appState.cursors[entry.path]
+            _initialCursorOffset.value = if (cursor != null)
+                linecolToOffset(text, cursor.first, cursor.second) else 0
             _currentFile.value = entry
             _dirty.value = false
             val wc = countWords(text)
@@ -267,7 +350,29 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             externalWritable = false
             _fileWritable.value = withContext(Dispatchers.IO) { iniFile.canWrite() }
             _content.value = text
+            _initialCursorOffset.value = 0
             _currentFile.value = DocEntry("writhdeck.ini", iniFile.absolutePath)
+            _dirty.value = false
+            _wordCount.value = countWords(text)
+            refreshStatus()
+        }
+    }
+
+    fun openScratchpad() {
+        viewModelScope.launch {
+            val scratchFile = File(docsDir, "scratchpad.txt")
+            val text = withContext(Dispatchers.IO) {
+                if (!scratchFile.exists()) { scratchFile.createNewFile(); "" }
+                else scratchFile.readText()
+            }
+            externalUri = null
+            externalWritable = false
+            _fileWritable.value = true
+            _content.value = text
+            val cursor = appState.cursors[scratchFile.absolutePath]
+            _initialCursorOffset.value = if (cursor != null)
+                linecolToOffset(text, cursor.first, cursor.second) else 0
+            _currentFile.value = DocEntry("scratchpad.txt", scratchFile.absolutePath)
             _dirty.value = false
             _wordCount.value = countWords(text)
             refreshStatus()
@@ -379,9 +484,6 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             }
             val resolvedPath = withContext(Dispatchers.IO) { resolveContentUri(uri, contentResolver) }
             val name = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':') ?: "untitled.txt"
-            // Only use direct path if we can actually write to it.
-            // Do NOT fall back to storagePermissionGranted: it does not grant write access
-            // to paths inside other apps' private directories (e.g. Termux /data/data/com.termux/).
             val pathWritable = resolvedPath != null && withContext(Dispatchers.IO) { File(resolvedPath).canWrite() }
             if (pathWritable) {
                 externalUri = null
@@ -398,6 +500,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 _currentFile.value = DocEntry(name, uri.toString())
             }
             _content.value = text
+            _initialCursorOffset.value = 0
             _dirty.value = false
             _wordCount.value = countWords(text)
         }
@@ -477,26 +580,61 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         refreshStatus()
     }
 
-    private fun refreshStatus() {
-        val name = _currentFile.value?.name ?: ""
-        val left = if (name.isEmpty()) "" else if (_dirty.value) "$name *" else name
+    // --- Cursor ---
 
-        val wc = _wordCount.value
-        val goal = config.wordGoal
-        val center = if (goal > 0) "$wc / $goal" else "$wc w"
-
-        val showTimer = _timerLastTick.value != 0L || _timerActive.value
-        val right = if (showTimer) buildTimerDisplay() else ""
-
-        _statusBar.value = StatusBar(left, center, right)
+    fun saveCursor(offset: Int) {
+        val path = _currentFile.value?.path ?: return
+        val text = _content.value
+        val (cy, cx) = textOffsetToLinecol(text, offset)
+        appState = StateStore.saveCursor(appState, path, cy, cx)
+        viewModelScope.launch(Dispatchers.IO) { StateStore.save(stateFile, appState) }
     }
 
-    private fun buildTimerDisplay(): String {
-        val secs = _timerRemaining.value
-        val m = secs / 60
-        val s = secs % 60
-        val display = "$m'${s.toString().padStart(2, '0')}\""
-        return if (_timerActive.value) "[$display]" else " $display"
+    private fun textOffsetToLinecol(text: String, offset: Int): Pair<Int, Int> {
+        val safe = offset.coerceIn(0, text.length)
+        val before = text.substring(0, safe)
+        val lines = before.split('\n')
+        return lines.size to lines.last().length
+    }
+
+    private fun linecolToOffset(text: String, cy: Int, cx: Int): Int {
+        if (text.isEmpty()) return 0
+        val lines = text.split('\n')
+        val lineIdx = (cy - 1).coerceIn(0, lines.size - 1)
+        val lineStart = lines.take(lineIdx).sumOf { it.length + 1 }
+        return lineStart + cx.coerceIn(0, lines[lineIdx].length)
+    }
+
+    // --- Workspace ---
+
+    fun toggleWorkspace(cursorOffset: Int) {
+        _wsDualMode.value = true
+        val current = WsSnapshot(
+            file = _currentFile.value, content = _content.value,
+            dirty = _dirty.value, wordCount = _wordCount.value,
+            writable = _fileWritable.value, extUri = externalUri,
+            extWritable = externalWritable, cursorOffset = cursorOffset
+        )
+        val next: WsSnapshot
+        if (_wsActive.value == 1) {
+            ws1Snap = current
+            next = ws2Snap
+            _wsActive.value = 2
+        } else {
+            ws2Snap = current
+            next = ws1Snap
+            _wsActive.value = 1
+        }
+        // Set initialCursorOffset before currentFile so remember(path, wsActive) picks it up.
+        _initialCursorOffset.value = next.cursorOffset
+        _content.value = next.content
+        _currentFile.value = next.file
+        _dirty.value = next.dirty
+        _wordCount.value = next.wordCount
+        _fileWritable.value = next.writable
+        externalUri = next.extUri
+        externalWritable = next.extWritable
+        refreshStatus()
     }
 
     // --- Schemes ---
@@ -553,8 +691,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun timerPause() {
-        timerJob?.cancel()
-        timerJob = null
+        timerJob?.cancel(); timerJob = null
         _timerActive.value = false
         refreshStatus()
     }
@@ -568,13 +705,14 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun timerReset() {
-        timerJob?.cancel()
-        timerJob = null
+        timerJob?.cancel(); timerJob = null
         _timerActive.value = false
         _timerLastTick.value = 0L
         _timerRemaining.value = if (_timerType.value == "stopwatch") 0 else config.timerDurationSecs()
         refreshStatus()
     }
+
+    fun dismissTimerAlert() { _timerAlertPending.value = false }
 
     private fun startTick() {
         timerJob = viewModelScope.launch {
@@ -588,6 +726,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                         _timerRemaining.value = 0
                         _timerActive.value = false
                         _timerLastTick.value = System.currentTimeMillis()
+                        if (config.timerSound) playTimerSound()
+                        if (config.timerAlert) _timerAlertPending.value = true
                         refreshStatus()
                         break
                     }
@@ -596,6 +736,67 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 _timerLastTick.value = System.currentTimeMillis()
                 refreshStatus()
             }
+        }
+    }
+
+    private fun playTimerSound() {
+        try {
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            RingtoneManager.getRingtone(getApplication(), uri)?.play()
+        } catch (_: Exception) {}
+    }
+
+    // --- Settings ---
+
+    fun getSettingsData() = SettingsData(
+        fontSize        = config.fontSize,
+        marginWidth     = config.marginWidth,
+        marginHeight    = config.marginHeight,
+        wordGoal        = config.wordGoal,
+        headingMarker   = config.headingMarker,
+        autosaveEnabled = config.autosaveEnabled,
+        autosaveInterval = config.autosaveInterval,
+        timerType       = config.timerType,
+        timerDuration   = config.timerDuration,
+        timerSound      = config.timerSound,
+        timerAlert      = config.timerAlert,
+        chronoShow      = config.chronoShow
+    )
+
+    fun applySettings(s: SettingsData) {
+        config = config.copy(
+            fontSize        = s.fontSize,
+            marginWidth     = s.marginWidth,
+            marginHeight    = s.marginHeight,
+            wordGoal        = s.wordGoal,
+            headingMarker   = s.headingMarker,
+            autosaveEnabled = s.autosaveEnabled,
+            autosaveInterval = s.autosaveInterval,
+            timerType       = s.timerType,
+            timerDuration   = s.timerDuration,
+            timerSound      = s.timerSound,
+            timerAlert      = s.timerAlert,
+            chronoShow      = s.chronoShow
+        )
+        applyConfig()
+        viewModelScope.launch(Dispatchers.IO) {
+            val iniFile = File(docsDir, "writhdeck.ini")
+            val text = if (iniFile.exists()) iniFile.readText() else IniParser.write(config)
+            fun b(v: Boolean) = if (v) "yes" else "no"
+            iniFile.writeText(IniParser.patchKeys(text,
+                "font_size"         to s.fontSize.toString(),
+                "margin_width"      to s.marginWidth.toString(),
+                "margin_height"     to s.marginHeight.toString(),
+                "word_goal"         to s.wordGoal.toString(),
+                "heading_marker"    to s.headingMarker,
+                "autosave_enabled"  to b(s.autosaveEnabled),
+                "autosave_interval" to s.autosaveInterval.toString(),
+                "timer_type"        to s.timerType,
+                "timer_duration"    to s.timerDuration.toString(),
+                "timer_sound"       to b(s.timerSound),
+                "timer_alert"       to b(s.timerAlert),
+                "chrono_show"       to b(s.chronoShow)
+            ))
         }
     }
 
@@ -610,8 +811,6 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             .map { (date, cnt) -> StatEntry(date, cnt) }
     }
 
-    // --- Word occurrences ---
-
     suspend fun getWordOccurrences(): List<Pair<String, Int>> =
         withContext(Dispatchers.Default) {
             val text = _content.value
@@ -622,6 +821,32 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             }
             counts.entries.sortedByDescending { it.value }.map { it.key to it.value }
         }
+
+    // --- Helpers ---
+
+    private fun refreshStatus() {
+        val name = _currentFile.value?.name ?: ""
+        val ws = _wsActive.value
+        val wsPrefix = if (_wsDualMode.value) "[$ws] " else ""
+        val left = if (name.isEmpty()) "" else if (_dirty.value) "$wsPrefix$name *" else "$wsPrefix$name"
+
+        val wc = _wordCount.value
+        val goal = config.wordGoal
+        val center = if (goal > 0) "$wc / $goal" else "$wc w"
+
+        val showTimer = _timerLastTick.value != 0L || _timerActive.value
+        val right = if (showTimer) buildTimerDisplay() else ""
+
+        _statusBar.value = StatusBar(left, center, right)
+    }
+
+    private fun buildTimerDisplay(): String {
+        val secs = _timerRemaining.value
+        val m = secs / 60
+        val s = secs % 60
+        val display = "$m'${s.toString().padStart(2, '0')}\""
+        return if (_timerActive.value) "[$display]" else " $display"
+    }
 
     private fun countWords(text: String): Int =
         text.trim().split(Regex("\\s+")).count { it.isNotEmpty() }
@@ -635,7 +860,10 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         return flags == Configuration.UI_MODE_NIGHT_YES
     }
 
-    override fun onCleared() { timerJob?.cancel() }
+    override fun onCleared() {
+        timerJob?.cancel()
+        autosaveJob?.cancel()
+    }
 
     private fun checkStoragePermission(): Boolean {
         val app = getApplication<Application>()

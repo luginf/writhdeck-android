@@ -18,7 +18,6 @@ import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Save
-import androidx.compose.material.icons.filled.Title
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -40,7 +39,6 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
@@ -135,12 +133,9 @@ fun tkKeyToAndroid(tkName: String): Key? = when (tkName.trim()) {
     else -> null
 }
 
-fun formatTimer(seconds: Int, active: Boolean, lastTick: Long, type: String): String {
-    val secs = if (type == "stopwatch") seconds
-               else if (active || lastTick != 0L) seconds
-               else seconds
-    val m = secs / 60
-    val s = secs % 60
+fun formatTimer(seconds: Int, active: Boolean): String {
+    val m = seconds / 60
+    val s = seconds % 60
     val display = "$m'${s.toString().padStart(2, '0')}\""
     return if (active) "[$display]" else " $display"
 }
@@ -158,26 +153,17 @@ fun buildToc(text: String, headingMarker: String, markdownHeadings: Boolean): Li
         var added = false
 
         if (mLen > 0 && trimmed.startsWith(headingMarker) && trimmed.endsWith(headingMarker)) {
-            // Count leading markers
-            var level = 0
-            var pos = 0
+            var level = 0; var pos = 0
             while (pos + mLen <= trimmed.length &&
-                   trimmed.substring(pos, pos + mLen) == headingMarker) {
-                level++; pos += mLen
-            }
-            // Strip trailing markers
+                   trimmed.substring(pos, pos + mLen) == headingMarker) { level++; pos += mLen }
             var end = trimmed.length
             while (end >= mLen &&
-                   trimmed.substring(end - mLen, end) == headingMarker) {
-                end -= mLen
-            }
+                   trimmed.substring(end - mLen, end) == headingMarker) { end -= mLen }
             val title = if (end > pos) trimmed.substring(pos, end).trim() else ""
             if (level > 0 && title.isNotEmpty()) {
-                entries.add(TocEntry(level, title, offset))
-                added = true
+                entries.add(TocEntry(level, title, offset)); added = true
             }
         }
-
         if (!added && mdRe != null) {
             val m = mdRe.find(trimmed)
             if (m != null)
@@ -200,13 +186,18 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     val keyToc by vm.keyToc.collectAsStateWithLifecycle()
     val marginWidth by vm.marginWidth.collectAsStateWithLifecycle()
     val marginHeight by vm.marginHeight.collectAsStateWithLifecycle()
+    val fontSize by vm.fontSize.collectAsStateWithLifecycle()
     val tocAndroidKey = remember(keyToc) { tkKeyToAndroid(keyToc) }
 
-    // Timer
     val timerActive by vm.timerActive.collectAsStateWithLifecycle()
     val timerRemaining by vm.timerRemaining.collectAsStateWithLifecycle()
     val timerLastTick by vm.timerLastTick.collectAsStateWithLifecycle()
     val timerType by vm.timerType.collectAsStateWithLifecycle()
+    val timerAlertPending by vm.timerAlertPending.collectAsStateWithLifecycle()
+
+    val wsActive by vm.wsActive.collectAsStateWithLifecycle()
+    val wsDualMode by vm.wsDualMode.collectAsStateWithLifecycle()
+    val initialCursorOffset by vm.initialCursorOffset.collectAsStateWithLifecycle()
 
     val themeColors by vm.themeColors.collectAsStateWithLifecycle()
     val darkPref by vm.darkModePreference.collectAsStateWithLifecycle()
@@ -217,19 +208,22 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
 
     LaunchedEffect(snackbarMessage) {
         val msg = snackbarMessage
-        if (msg != null) {
-            snackbarHostState.showSnackbar(msg)
-            vm.dismissSnackbar()
-        }
+        if (msg != null) { snackbarHostState.showSnackbar(msg); vm.dismissSnackbar() }
     }
+
     val bgColor = parseHexColor(themeColors.bg)
     val fgColor = parseHexColor(themeColors.fg)
     val hdColor = parseHexColor(themeColors.headingColor)
-
     val colorScheme = MaterialTheme.colorScheme
     val scope = rememberCoroutineScope()
 
-    var tfv by remember(currentFile?.path) { mutableStateOf(TextFieldValue(content)) }
+    // Reset when file changes OR workspace switches.
+    // initialCursorOffset is set before currentFile/wsActive change so it's visible here.
+    var tfv by remember(currentFile?.path, wsActive) {
+        mutableStateOf(
+            TextFieldValue(content, selection = TextRange(initialCursorOffset.coerceIn(0, content.length)))
+        )
+    }
 
     var distractionFree by rememberSaveable { mutableStateOf(false) }
     var showReadOnlyAlert by remember { mutableStateOf(false) }
@@ -237,6 +231,11 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
 
     LaunchedEffect(currentFile?.path) {
         if (!fileWritable && currentFile != null) showReadOnlyAlert = true
+    }
+
+    fun doBack() {
+        vm.saveCursor(tfv.selection.start)
+        onBack()
     }
 
     if (distractionFree) BackHandler { distractionFree = false }
@@ -247,9 +246,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
         var ctx = context
         while (ctx is ContextWrapper && ctx !is Activity) ctx = ctx.baseContext
         val activity = ctx as? Activity
-        val controller = activity?.window?.let {
-            WindowCompat.getInsetsController(it, it.decorView)
-        }
+        val controller = activity?.window?.let { WindowCompat.getInsetsController(it, it.decorView) }
         if (controller != null) {
             if (distractionFree) {
                 controller.hide(WindowInsetsCompat.Type.systemBars())
@@ -259,9 +256,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 controller.show(WindowInsetsCompat.Type.systemBars())
             }
         }
-        onDispose {
-            controller?.show(WindowInsetsCompat.Type.systemBars())
-        }
+        onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
     }
 
     var showToc by remember { mutableStateOf(false) }
@@ -269,33 +264,28 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
         buildToc(content, headingMarker, markdownHeadings)
     }
 
-    // Overlays
     var showCmdMode by remember { mutableStateOf(false) }
     var showStats by remember { mutableStateOf(false) }
     var showWords by remember { mutableStateOf(false) }
     var statsData by remember { mutableStateOf<List<StatEntry>>(emptyList()) }
     var wordsData by remember { mutableStateOf<List<Pair<String, Int>>>(emptyList()) }
 
+    val titleText = buildString {
+        if (wsDualMode) append("[$wsActive] ")
+        append(currentFile?.name ?: "Editor")
+        if (!fileWritable) append(" [read-only]") else if (dirty) append(" *")
+    }
+
     Scaffold(
         topBar = {
             if (!distractionFree) TopAppBar(
-                title = {
-                    Text(
-                        text = buildString {
-                            append(currentFile?.name ?: "Editor")
-                            if (!fileWritable) append(" [read-only]")
-                            else if (dirty) append(" *")
-                        },
-                        fontFamily = FontFamily.Monospace,
-                        maxLines = 1
-                    )
-                },
+                title = { Text(titleText, fontFamily = FontFamily.Monospace, maxLines = 1) },
                 navigationIcon = {
                     IconButton(onClick = {
                         when {
                             dirty && !fileWritable -> showDiscardConfirm = true
-                            dirty -> { vm.saveFile(); onBack() }
-                            else -> onBack()
+                            dirty -> { vm.saveFile(); doBack() }
+                            else  -> doBack()
                         }
                     }) {
                         @Suppress("DEPRECATION")
@@ -304,15 +294,10 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 },
                 actions = {
                     val darkModeIcon = when (darkPref) {
-                        "yes" -> Icons.Filled.DarkMode
-                        "no"  -> Icons.Filled.LightMode
+                        "yes" -> Icons.Filled.DarkMode; "no" -> Icons.Filled.LightMode
                         else  -> Icons.Outlined.DarkMode
                     }
-                    val nextDarkPref = when (darkPref) {
-                        "auto" -> "yes"
-                        "yes"  -> "no"
-                        else   -> "auto"
-                    }
+                    val nextDarkPref = when (darkPref) { "auto" -> "yes"; "yes" -> "no"; else -> "auto" }
                     IconButton(onClick = { vm.setDarkModePreference(nextDarkPref) }) {
                         Icon(darkModeIcon, contentDescription = "Dark mode: $darkPref")
                     }
@@ -337,48 +322,29 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
         bottomBar = {
             if (!distractionFree) Surface(tonalElevation = 2.dp) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                        .navigationBarsPadding()
-                        .clickable { showCmdMode = true },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                        .navigationBarsPadding().clickable { showCmdMode = true },
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = statusBar.left,
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colorScheme.onSurfaceVariant
-                    )
+                    Text(statusBar.left, fontFamily = FontFamily.Monospace,
+                         style = MaterialTheme.typography.bodySmall, color = colorScheme.onSurfaceVariant)
                     if (statusBar.center.isNotEmpty()) {
-                        Text(
-                            text = statusBar.center,
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colorScheme.onSurfaceVariant
-                        )
+                        Text(statusBar.center, fontFamily = FontFamily.Monospace,
+                             style = MaterialTheme.typography.bodySmall, color = colorScheme.onSurfaceVariant)
                     }
-                    Text(
-                        text = statusBar.right,
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (timerActive) colorScheme.primary else colorScheme.onSurfaceVariant
-                    )
+                    Text(statusBar.right, fontFamily = FontFamily.Monospace,
+                         style = MaterialTheme.typography.bodySmall,
+                         color = if (timerActive) colorScheme.primary else colorScheme.onSurfaceVariant)
                 }
             }
         }
     ) { padding ->
-        // Use INI colors when both are valid (they form a pair from the same scheme).
-        // Fall back to Material3 if either is unresolved to avoid mixing a dark bg with a light fg.
         val hasTclColors = bgColor != Color.Unspecified && fgColor != Color.Unspecified
         val editorBg = if (hasTclColors) bgColor else colorScheme.background
         val editorFg = if (hasTclColors) fgColor else colorScheme.onSurface
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(editorBg)
-                .padding(padding)
+            modifier = Modifier.fillMaxSize().background(editorBg).padding(padding)
         ) {
             BasicTextField(
                 value = tfv,
@@ -388,16 +354,15 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 },
                 textStyle = TextStyle(
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 16.sp,
-                    lineHeight = 24.sp,
+                    fontSize = fontSize.sp,
+                    lineHeight = (fontSize * 1.5).sp,
                     color = editorFg
                 ),
                 cursorBrush = SolidColor(colorScheme.primary),
                 visualTransformation = remember(headingMarker, markdownHeadings, hdColor) {
                     HeadingVisualTransformation(headingMarker, markdownHeadings, hdColor)
                 },
-                modifier = Modifier
-                    .fillMaxSize()
+                modifier = Modifier.fillMaxSize()
                     .padding(horizontal = marginWidth.dp, vertical = marginHeight.dp)
                     .imePadding()
                     .onKeyEvent { event ->
@@ -406,9 +371,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                             tocAndroidKey != null && event.key == tocAndroidKey && toc.isNotEmpty() -> {
                                 showToc = true; true
                             }
-                            event.key == Key.Escape -> {
-                                showCmdMode = true; true
-                            }
+                            event.key == Key.Escape -> { showCmdMode = true; true }
                             else -> false
                         }
                     }
@@ -418,11 +381,8 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                     onClick = { distractionFree = false },
                     modifier = Modifier.align(Alignment.TopEnd).padding(4.dp)
                 ) {
-                    Icon(
-                        Icons.Filled.FullscreenExit,
-                        contentDescription = "Exit distraction-free",
-                        tint = editorFg.copy(alpha = 0.35f)
-                    )
+                    Icon(Icons.Filled.FullscreenExit, contentDescription = "Exit distraction-free",
+                         tint = editorFg.copy(alpha = 0.35f))
                 }
             }
         }
@@ -431,11 +391,8 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     // TOC sheet
     if (showToc) {
         ModalBottomSheet(onDismissRequest = { showToc = false }) {
-            Text(
-                text = "Table of contents",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp)
-            )
+            Text("Table of contents", style = MaterialTheme.typography.titleMedium,
+                 modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp))
             LazyColumn(contentPadding = PaddingValues(bottom = 32.dp)) {
                 itemsIndexed(toc) { _, entry ->
                     val indent = (entry.level - 1) * 16
@@ -445,14 +402,11 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                         fontWeight = if (entry.level == 1) FontWeight.Bold else FontWeight.Normal,
                         fontSize = when (entry.level) { 1 -> 16.sp; 2 -> 15.sp; else -> 14.sp },
                         color = if (entry.level == 1) colorScheme.primary else colorScheme.onSurface,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                val pos = entry.charOffset.coerceIn(0, tfv.text.length)
-                                tfv = tfv.copy(selection = TextRange(pos))
-                                showToc = false
-                            }
-                            .padding(start = (20 + indent).dp, end = 20.dp, top = 10.dp, bottom = 10.dp)
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            val pos = entry.charOffset.coerceIn(0, tfv.text.length)
+                            tfv = tfv.copy(selection = TextRange(pos))
+                            showToc = false
+                        }.padding(start = (20 + indent).dp, end = 20.dp, top = 10.dp, bottom = 10.dp)
                     )
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 20.dp))
                 }
@@ -463,41 +417,27 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     // Command mode sheet
     if (showCmdMode) {
         ModalBottomSheet(onDismissRequest = { showCmdMode = false }) {
-            Text(
-                text = "Commands",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 16.dp)
-            )
+            Text("Commands", style = MaterialTheme.typography.titleMedium,
+                 modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 16.dp))
 
-            // Timer section
-            Surface(
-                tonalElevation = 2.dp,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-            ) {
+            // Timer
+            Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
+                    Row(verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
+                        modifier = Modifier.fillMaxWidth()) {
                         Text(
-                            text = formatTimer(timerRemaining, timerActive, timerLastTick, timerType)
-                                .trim(),
+                            text = formatTimer(timerRemaining, timerActive).trim(),
                             fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.titleLarge,
                             color = if (timerActive) colorScheme.primary else colorScheme.onSurface
                         )
                         Row {
                             if (!timerActive && timerLastTick == 0L) {
-                                // Fresh — show Start
                                 Button(onClick = { vm.timerStart() }) { Text("Start") }
                             } else if (timerActive) {
-                                // Running — show Pause
                                 Button(onClick = { vm.timerPause() }) { Text("Pause") }
                             } else {
-                                // Paused — show Resume
                                 Button(onClick = { vm.timerResume() }) { Text("Resume") }
                                 Spacer(Modifier.width(8.dp))
                                 OutlinedButton(onClick = { vm.timerReset() }) { Text("Reset") }
@@ -513,30 +453,42 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
 
             Spacer(Modifier.height(12.dp))
 
-            // Action buttons row 1
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
+            // Workspace
+            Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(
+                        text = "Workspace $wsActive",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    OutlinedButton(onClick = {
+                        val offset = tfv.selection.start
+                        showCmdMode = false
+                        vm.toggleWorkspace(offset)
+                    }) {
+                        Text("Switch to WS${if (wsActive == 1) 2 else 1}")
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            // Actions row 1
+            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(
                     onClick = {
                         showCmdMode = false
-                        scope.launch {
-                            statsData = vm.getDailyStats()
-                            showStats = true
-                        }
+                        scope.launch { statsData = vm.getDailyStats(); showStats = true }
                     },
                     modifier = Modifier.weight(1f)
                 ) { Text("Stats") }
                 OutlinedButton(
                     onClick = {
                         showCmdMode = false
-                        scope.launch {
-                            wordsData = vm.getWordOccurrences()
-                            showWords = true
-                        }
+                        scope.launch { wordsData = vm.getWordOccurrences(); showWords = true }
                     },
                     modifier = Modifier.weight(1f)
                 ) { Text("Words") }
@@ -544,13 +496,9 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
 
             Spacer(Modifier.height(8.dp))
 
-            // Action buttons row 2
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
+            // Actions row 2
+            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(
                     onClick = { showCmdMode = false; showToc = true },
                     enabled = toc.isNotEmpty(),
@@ -559,9 +507,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 OutlinedButton(
                     onClick = {
                         val newTfv = applyHeading(tfv, headingMarker)
-                        tfv = newTfv
-                        vm.updateContent(newTfv.text)
-                        showCmdMode = false
+                        tfv = newTfv; vm.updateContent(newTfv.text); showCmdMode = false
                     },
                     enabled = headingMarker.isNotEmpty(),
                     modifier = Modifier.weight(1f)
@@ -584,12 +530,8 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 } else {
                     LazyColumn {
                         itemsIndexed(statsData) { _, entry ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 6.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text(entry.date, fontFamily = FontFamily.Monospace,
                                      style = MaterialTheme.typography.bodyMedium)
                                 Text("${entry.words} w", fontFamily = FontFamily.Monospace,
@@ -601,9 +543,17 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                     }
                 }
             },
-            confirmButton = {
-                TextButton(onClick = { showStats = false }) { Text("Close") }
-            }
+            confirmButton = { TextButton(onClick = { showStats = false }) { Text("Close") } }
+        )
+    }
+
+    // Timer alert
+    if (timerAlertPending) {
+        AlertDialog(
+            onDismissRequest = { vm.dismissTimerAlert() },
+            title = { Text("Timer finished", fontFamily = FontFamily.Monospace) },
+            text = { Text("Your writing session is complete.", style = MaterialTheme.typography.bodyMedium) },
+            confirmButton = { Button(onClick = { vm.dismissTimerAlert() }) { Text("OK") } }
         )
     }
 
@@ -613,19 +563,15 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
             onDismissRequest = { showReadOnlyAlert = false },
             title = { Text("Read-only file", fontFamily = FontFamily.Monospace) },
             text = {
-                Text(
-                    "This file cannot be saved from WrithDeck.\n\n" +
-                    "You can view and copy the content, but changes will not be persisted.",
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                Text("This file cannot be saved from WrithDeck.\n\n" +
+                     "You can view and copy the content, but changes will not be persisted.",
+                     style = MaterialTheme.typography.bodyMedium)
             },
-            confirmButton = {
-                TextButton(onClick = { showReadOnlyAlert = false }) { Text("OK") }
-            }
+            confirmButton = { TextButton(onClick = { showReadOnlyAlert = false }) { Text("OK") } }
         )
     }
 
-    // Discard confirmation (read-only + unsaved changes)
+    // Discard confirmation
     if (showDiscardConfirm) {
         AlertDialog(
             onDismissRequest = { showDiscardConfirm = false },
@@ -633,13 +579,11 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
             text = { Text("This file is read-only. Changes cannot be saved and will be lost.") },
             confirmButton = {
                 TextButton(
-                    onClick = { showDiscardConfirm = false; onBack() },
+                    onClick = { showDiscardConfirm = false; doBack() },
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
                 ) { Text("Discard") }
             },
-            dismissButton = {
-                TextButton(onClick = { showDiscardConfirm = false }) { Text("Stay") }
-            }
+            dismissButton = { TextButton(onClick = { showDiscardConfirm = false }) { Text("Stay") } }
         )
     }
 
@@ -655,33 +599,19 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 } else {
                     LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
                         itemsIndexed(wordsData) { idx, (word, count) ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 5.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(
-                                    text = "${idx + 1}. $word",
-                                    fontFamily = FontFamily.Monospace,
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                                Text(
-                                    text = "$count",
-                                    fontFamily = FontFamily.Monospace,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = colorScheme.primary
-                                )
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("${idx + 1}. $word", fontFamily = FontFamily.Monospace,
+                                     style = MaterialTheme.typography.bodyMedium)
+                                Text("$count", fontFamily = FontFamily.Monospace,
+                                     style = MaterialTheme.typography.bodyMedium, color = colorScheme.primary)
                             }
-                            if (idx < wordsData.lastIndex)
-                                HorizontalDivider()
+                            if (idx < wordsData.lastIndex) HorizontalDivider()
                         }
                     }
                 }
             },
-            confirmButton = {
-                TextButton(onClick = { showWords = false }) { Text("Close") }
-            }
+            confirmButton = { TextButton(onClick = { showWords = false }) { Text("Close") } }
         )
     }
 }

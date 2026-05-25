@@ -107,6 +107,9 @@ object StateStore {
         daily     = state.daily.filter     { it.key != path }
     )
 
+    fun saveCursor(state: AppState, path: String, cy: Int, cx: Int): AppState =
+        state.copy(cursors = state.cursors + (path to (cy to cx)))
+
     fun updateDaily(state: AppState, path: String, wordCount: Int, today: String): AppState {
         val fileData = state.daily.getOrDefault(path, emptyMap()).toMutableMap()
         val existing = fileData[today] ?: 0

@@ -22,7 +22,10 @@ data class AppConfig(
     val keyToc: String = "F11",
     val docsCustomDir: String = "",
     val activeProfile: String = "default",
-    val customSchemes: Map<String, SchemeColors> = emptyMap()
+    val customSchemes: Map<String, SchemeColors> = emptyMap(),
+    val fontSize: Int = 16,
+    val autosaveEnabled: Boolean = true,
+    val autosaveInterval: Int = 1
 ) {
     fun schemeColors(): SchemeColors =
         customSchemes[scheme] ?: BUILTIN_SCHEMES[scheme] ?: BUILTIN_SCHEMES["default"]!!
@@ -110,7 +113,10 @@ object IniParser {
             keyToc           = str("key_toc", "F11"),
             docsCustomDir    = keys["docs_dir"] ?: "",
             activeProfile    = activeProfile,
-            customSchemes    = customSchemes
+            customSchemes    = customSchemes,
+            fontSize         = int("font_size", 16).coerceIn(10, 32),
+            autosaveEnabled  = bool("autosave_enabled", true),
+            autosaveInterval = int("autosave_interval", 1).coerceAtLeast(1)
         )
     }
 

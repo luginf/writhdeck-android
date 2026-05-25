@@ -210,7 +210,7 @@ private fun SchemeEditor(
     onSave: (name: String, colors: SchemeColors) -> Unit,
     onCancel: () -> Unit
 ) {
-    var nameField by remember(originalName) { mutableStateOf(if (isBuiltin) "" else originalName) }
+    var nameField by remember(originalName) { mutableStateOf(originalName) }
     var darkFields by remember(originalName) { mutableStateOf(initialColors.darkList()) }
     var lightFields by remember(originalName) { mutableStateOf(initialColors.lightList()) }
     var selectedTab by remember { mutableStateOf(0) }

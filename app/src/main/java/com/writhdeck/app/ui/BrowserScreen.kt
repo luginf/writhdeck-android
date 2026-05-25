@@ -2,6 +2,7 @@ package com.writhdeck.app.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -49,7 +50,9 @@ import java.util.Locale
 fun BrowserScreen(
     vm: WrithdeckViewModel,
     onOpenFile: (DocEntry) -> Unit,
+    onOpenScratchpad: () -> Unit = {},
     onNavigateSchemes: () -> Unit = {},
+    onNavigateSettings: () -> Unit = {},
     onRequestPermission: () -> Unit
 ) {
     val docs by vm.docs.collectAsStateWithLifecycle()
@@ -101,7 +104,8 @@ fun BrowserScreen(
         shortcutBuffer = TextFieldValue("")
         when (ch.lowercaseChar()) {
             'n' -> showNewDialog = true
-            'c' -> vm.openIniFile()
+            't' -> { imeAllowed = false; onOpenScratchpad() }
+            'c' -> onNavigateSettings()
             'f' -> selectedEntry?.let { vm.toggleFavorite(it) }
             'r' -> selectedEntry?.let {
                 contextEntry = it
@@ -149,8 +153,8 @@ fun BrowserScreen(
                     IconButton(onClick = onNavigateSchemes) {
                         Icon(Icons.Default.Palette, contentDescription = "Color schemes")
                     }
-                    IconButton(onClick = { vm.openIniFile() }) {
-                        Icon(Icons.Default.Settings, contentDescription = "Config")
+                    IconButton(onClick = onNavigateSettings) {
+                        Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }
                 }
             )
@@ -171,6 +175,33 @@ fun BrowserScreen(
                 LazyColumn(
                     modifier = Modifier.fillMaxSize()
                 ) {
+                    // Scratchpad — always-visible quick note
+                    item(key = "scratchpad") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { imeAllowed = false; onOpenScratchpad() }
+                                .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "scratchpad",
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f).padding(vertical = 8.dp)
+                            )
+                            Text(
+                                text = "t",
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                modifier = Modifier.padding(end = 12.dp)
+                            )
+                        }
+                        HorizontalDivider()
+                    }
+
                     // Storage permission banner
                     if (!storageGranted && !permissionBannerDismissed) {
                         item {
