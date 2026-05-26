@@ -2,6 +2,16 @@ package com.writhdeck.app.ui
 
 import android.app.Activity
 import android.content.ContextWrapper
+import android.graphics.Typeface
+import android.text.Editable
+import android.text.Spannable
+import android.text.TextWatcher
+import android.text.style.BackgroundColorSpan
+import android.text.style.ForegroundColorSpan
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.KeyEvent as AKeyEvent
+import android.view.inputmethod.EditorInfo
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -28,56 +38,47 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.*
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.OffsetMapping
-import androidx.compose.ui.text.input.TextFieldValue
-import androidx.compose.ui.text.input.TransformedText
-import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.writhdeck.app.StatEntry
 import com.writhdeck.app.WrithdeckViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-fun applyHeading(tfv: TextFieldValue, marker: String): TextFieldValue {
-    if (marker.isEmpty()) return tfv
-    val text = tfv.text
-    val sel = tfv.selection
-    val lineStart = (text.lastIndexOf('\n', (sel.min - 1).coerceAtLeast(0))
-        .let { if (it < 0) 0 else it + 1 })
-    val lineEnd = text.indexOf('\n', sel.max).let { if (it < 0) text.length else it }
-    val mLen = marker.length
+// Marker span classes — used to find and remove old spans without touching unrelated ones.
+private class SyntaxHeadingSpan(color: Int) : ForegroundColorSpan(color)
+private class SyntaxCommentSpan(color: Int) : ForegroundColorSpan(color)
+private class SearchBgSpan(color: Int) : BackgroundColorSpan(color)
+private class SearchCurrentBgSpan(color: Int) : BackgroundColorSpan(color)
+private class SearchCurrentFgSpan(color: Int) : ForegroundColorSpan(color)
 
-    val newLines = text.substring(lineStart, lineEnd).split('\n').joinToString("\n") { line ->
-        val t = line.trim()
-        if (t.isEmpty()) return@joinToString line
-        val isH = t.startsWith(marker) && t.endsWith(marker) && t.length > mLen
-        if (isH) {
-            var s = 0; while (s + mLen <= t.length && t.substring(s, s + mLen) == marker) s += mLen
-            var e = t.length; while (e - mLen >= s && t.substring(e - mLen, e) == marker) e -= mLen
-            t.substring(s, e).trim()
-        } else {
-            "$marker $t $marker"
-        }
-    }
-    val newText = text.substring(0, lineStart) + newLines + text.substring(lineEnd)
-    return TextFieldValue(newText, TextRange(lineStart, lineStart + newLines.length))
+fun parseHexColorInt(hex: String): Int {
+    val h = hex.trimStart('#')
+    if (h.length != 6) return 0
+    return try {
+        val r = h.substring(0, 2).toInt(16)
+        val g = h.substring(2, 4).toInt(16)
+        val b = h.substring(4, 6).toInt(16)
+        (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+    } catch (_: Exception) { 0 }
 }
 
 fun parseHexColor(hex: String): Color {
@@ -92,87 +93,78 @@ fun parseHexColor(hex: String): Color {
     } catch (_: Exception) { Color.Unspecified }
 }
 
-private class SyntaxVisualTransformation(
-    private val headingMarker: String,
-    private val markdownHeadings: Boolean,
-    private val headingColor: Color,
-    private val commentColor: Color,
-    private val searchRanges: List<IntRange>,
-    private val currentMatchIdx: Int,
-    private val matchBgColor: Color,
-    private val currentMatchBgColor: Color,
-    private val currentMatchFgColor: Color
-) : VisualTransformation {
-    private val mdRe = if (markdownHeadings) Regex("^#{1,6}\\s") else null
-    private val mLen = headingMarker.length
+data class SyntaxSpanData(val start: Int, val end: Int, val isHeading: Boolean, val color: Int)
 
-    // Cache syntax-only result — reused when only selection/search changes, not text content.
-    private var cachedInputText: String = ""
-    private var cachedSyntaxAnnotated: AnnotatedString? = null
-
-    override fun filter(text: AnnotatedString): TransformedText {
-        val syntaxAnnotated = if (text.text == cachedInputText && cachedSyntaxAnnotated != null) {
-            cachedSyntaxAnnotated!!
-        } else {
-            buildSyntaxAnnotated(text).also {
-                cachedInputText = text.text
-                cachedSyntaxAnnotated = it
+fun computeSyntaxSpans(
+    text: String, headingMarker: String, markdownHeadings: Boolean,
+    hdColorInt: Int, cmtColorInt: Int
+): List<SyntaxSpanData> {
+    if (hdColorInt == 0 && cmtColorInt == 0) return emptyList()
+    val spans = mutableListOf<SyntaxSpanData>()
+    val mLen = headingMarker.length
+    val mdRe = if (markdownHeadings) Regex("^#{1,6}\\s") else null
+    var lineStart = 0
+    while (lineStart <= text.length) {
+        val lineEnd = text.indexOf('\n', lineStart).let { if (it < 0) text.length else it }
+        var ts = lineStart; while (ts < lineEnd && text[ts] == ' ') ts++
+        val end = lineEnd.coerceAtMost(text.length)
+        if (end > lineStart) {
+            val isComment = ts < lineEnd && (
+                text[ts] == '%' || text[ts] == '>' ||
+                (text[ts] == '/' && ts + 1 < lineEnd && text[ts + 1] == '/')
+            )
+            val isHeading = !isComment && mLen > 0 && lineEnd - lineStart > mLen &&
+                text.startsWith(headingMarker, ts) && run {
+                    var te = lineEnd - 1
+                    while (te > ts && text[te] == ' ') te--
+                    te >= ts + mLen && text.startsWith(headingMarker, te - mLen + 1)
+                } || (!isComment && mdRe != null && ts < lineEnd &&
+                    mdRe.containsMatchIn(text.substring(lineStart, lineEnd)))
+            when {
+                isComment && cmtColorInt != 0 -> spans.add(SyntaxSpanData(lineStart, end, false, cmtColorInt))
+                isHeading && hdColorInt != 0  -> spans.add(SyntaxSpanData(lineStart, end, true,  hdColorInt))
             }
         }
-        if (searchRanges.isEmpty()) return TransformedText(syntaxAnnotated, OffsetMapping.Identity)
-        val result = buildAnnotatedString {
-            append(syntaxAnnotated)
-            searchRanges.forEachIndexed { idx, range ->
-                val s = range.first.coerceIn(0, text.length)
-                val e = (range.last + 1).coerceIn(0, text.length)
-                if (s < e) addStyle(
-                    if (idx == currentMatchIdx)
-                        SpanStyle(background = currentMatchBgColor, color = currentMatchFgColor)
-                    else SpanStyle(background = matchBgColor), s, e
-                )
-            }
-        }
-        return TransformedText(result, OffsetMapping.Identity)
+        if (lineEnd >= text.length) break
+        lineStart = lineEnd + 1
     }
+    return spans
+}
 
-    private fun buildSyntaxAnnotated(text: AnnotatedString): AnnotatedString {
-        data class Span(val start: Int, val end: Int, val style: SpanStyle)
-        val spans = mutableListOf<Span>()
-        var offset = 0
-        var lineStart = 0
-        val raw = text.text
-        while (lineStart <= raw.length) {
-            val lineEnd = raw.indexOf('\n', lineStart).let { if (it < 0) raw.length else it }
-            var ts = lineStart; while (ts < lineEnd && raw[ts] == ' ') ts++
-            val end = lineEnd.coerceAtMost(raw.length)
-            if (end > lineStart) {
-                val isComment = ts < lineEnd && (
-                    raw[ts] == '%' || raw[ts] == '>' ||
-                    (raw[ts] == '/' && ts + 1 < lineEnd && raw[ts + 1] == '/')
-                )
-                val isHeading = !isComment && mLen > 0 && lineEnd - lineStart > mLen &&
-                    raw.startsWith(headingMarker, ts) && run {
-                        var te = lineEnd - 1
-                        while (te > ts && raw[te] == ' ') te--
-                        te >= ts + mLen && raw.startsWith(headingMarker, te - mLen + 1)
-                    } || (!isComment && mdRe != null && ts < lineEnd &&
-                        mdRe.containsMatchIn(raw.substring(lineStart, lineEnd)))
-                when {
-                    isComment && commentColor != Color.Unspecified ->
-                        spans.add(Span(lineStart, end, SpanStyle(color = commentColor)))
-                    isHeading && headingColor != Color.Unspecified ->
-                        spans.add(Span(lineStart, end, SpanStyle(color = headingColor)))
-                }
-            }
-            lineStart = lineEnd + 1
-            offset += lineEnd - offset + 1
-        }
-        if (spans.isEmpty()) return text
-        return buildAnnotatedString {
-            append(text)
-            for ((s, e, style) in spans) addStyle(style, s, e)
+fun applySyntaxSpansToEditable(editable: Editable, spans: List<SyntaxSpanData>) {
+    editable.getSpans(0, editable.length, SyntaxHeadingSpan::class.java).forEach { editable.removeSpan(it) }
+    editable.getSpans(0, editable.length, SyntaxCommentSpan::class.java).forEach { editable.removeSpan(it) }
+    for (sd in spans) {
+        val s = sd.start.coerceIn(0, editable.length)
+        val e = sd.end.coerceIn(0, editable.length)
+        if (s < e) {
+            val span = if (sd.isHeading) SyntaxHeadingSpan(sd.color) else SyntaxCommentSpan(sd.color)
+            editable.setSpan(span, s, e, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
     }
+}
+
+// Returns (newText, selStart, selEnd) or null if marker is empty.
+fun applyHeadingResult(text: String, selStart: Int, selEnd: Int, marker: String): Triple<String, Int, Int>? {
+    if (marker.isEmpty()) return null
+    val minSel = minOf(selStart, selEnd)
+    val maxSel = maxOf(selStart, selEnd)
+    val lineStart = text.lastIndexOf('\n', (minSel - 1).coerceAtLeast(0))
+        .let { if (it < 0) 0 else it + 1 }
+    val lineEnd = text.indexOf('\n', maxSel).let { if (it < 0) text.length else it }
+    val mLen = marker.length
+    val newLines = text.substring(lineStart, lineEnd).split('\n').joinToString("\n") { line ->
+        val t = line.trim()
+        if (t.isEmpty()) return@joinToString line
+        val isH = t.startsWith(marker) && t.endsWith(marker) && t.length > mLen
+        if (isH) {
+            var s = 0; while (s + mLen <= t.length && t.substring(s, s + mLen) == marker) s += mLen
+            var e = t.length; while (e - mLen >= s && t.substring(e - mLen, e) == marker) e -= mLen
+            t.substring(s, e).trim()
+        } else { "$marker $t $marker" }
+    }
+    val newText = text.substring(0, lineStart) + newLines + text.substring(lineEnd)
+    return Triple(newText, lineStart, lineStart + newLines.length)
 }
 
 fun tkKeyToAndroid(tkName: String): Key? = when (tkName.trim()) {
@@ -204,28 +196,22 @@ fun buildToc(text: String, headingMarker: String, markdownHeadings: Boolean): Li
     val entries = mutableListOf<TocEntry>()
     val mLen = headingMarker.length
     val mdRe = if (markdownHeadings) Regex("^(#{1,6})\\s+(.+)$") else null
-
     var offset = 0
     for (line in text.lines()) {
         val trimmed = line.trim()
         var added = false
-
         if (mLen > 0 && trimmed.startsWith(headingMarker) && trimmed.endsWith(headingMarker)) {
             var level = 0; var pos = 0
             while (pos + mLen <= trimmed.length &&
                    trimmed.substring(pos, pos + mLen) == headingMarker) { level++; pos += mLen }
             var end = trimmed.length
-            while (end >= mLen &&
-                   trimmed.substring(end - mLen, end) == headingMarker) { end -= mLen }
+            while (end >= mLen && trimmed.substring(end - mLen, end) == headingMarker) { end -= mLen }
             val title = if (end > pos) trimmed.substring(pos, end).trim() else ""
-            if (level > 0 && title.isNotEmpty()) {
-                entries.add(TocEntry(level, title, offset)); added = true
-            }
+            if (level > 0 && title.isNotEmpty()) { entries.add(TocEntry(level, title, offset)); added = true }
         }
         if (!added && mdRe != null) {
             val m = mdRe.find(trimmed)
-            if (m != null)
-                entries.add(TocEntry(m.groupValues[1].length, m.groupValues[2].trim(), offset))
+            if (m != null) entries.add(TocEntry(m.groupValues[1].length, m.groupValues[2].trim(), offset))
         }
         offset += line.length + 1
     }
@@ -246,11 +232,11 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     val marginHeight by vm.marginHeight.collectAsStateWithLifecycle()
     val fontSize by vm.fontSize.collectAsStateWithLifecycle()
     val tocAndroidKey = remember(keyToc) { tkKeyToAndroid(keyToc) }
+    val tocKeyCode = remember(tocAndroidKey) { tocAndroidKey?.keyCode?.toInt() }
 
     val timerActive by vm.timerActive.collectAsStateWithLifecycle()
     val timerRemaining by vm.timerRemaining.collectAsStateWithLifecycle()
     val timerLastTick by vm.timerLastTick.collectAsStateWithLifecycle()
-    val timerType by vm.timerType.collectAsStateWithLifecycle()
     val timerAlertPending by vm.timerAlertPending.collectAsStateWithLifecycle()
 
     val wsActive by vm.wsActive.collectAsStateWithLifecycle()
@@ -278,13 +264,26 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     val currentMatchFgColor = colorScheme.onTertiary
     val scope = rememberCoroutineScope()
 
-    // Reset when file changes OR workspace switches.
-    // vm.liveCursor is a plain var kept in sync on every selection change — survives rotation.
-    var tfv by remember(currentFile?.path, wsActive) {
-        mutableStateOf(
-            TextFieldValue(content, selection = TextRange(vm.liveCursor.coerceIn(0, content.length)))
-        )
-    }
+    val hasTclColors = bgColor != Color.Unspecified && fgColor != Color.Unspecified
+    val editorBg = if (hasTclColors) bgColor else colorScheme.background
+    val editorFg = if (hasTclColors) fgColor else colorScheme.onSurface
+    val editorFgInt = editorFg.toArgb()
+    val hdColorInt = if (hdColor != Color.Unspecified) hdColor.toArgb() else 0
+    val cmtColorInt = if (cmtColor != Color.Unspecified) cmtColor.toArgb() else 0
+    val matchBgInt = matchBgColor.toArgb()
+    val currentMatchBgInt = currentMatchBgColor.toArgb()
+    val currentMatchFgInt = currentMatchFgColor.toArgb()
+
+    val density = LocalDensity.current
+    val marginWidthPx  = remember(marginWidth,  density) { with(density) { marginWidth.dp.roundToPx() } }
+    val marginHeightPx = remember(marginHeight, density) { with(density) { marginHeight.dp.roundToPx() } }
+
+    // Native EditText ref + state refs shared with factory closure
+    val editorRef = remember { mutableStateOf<android.widget.EditText?>(null) }
+    val ignoreTextChange = remember { booleanArrayOf(false) }
+    val keyHandlerRef   = remember { arrayOf<(Int, AKeyEvent) -> Boolean>({ _, _ -> false }) }
+    @Suppress("UNCHECKED_CAST")
+    val originalKeyListener = remember { arrayOfNulls<android.text.method.KeyListener>(1) }
 
     var distractionFree by rememberSaveable { mutableStateOf(false) }
     var showReadOnlyAlert by remember { mutableStateOf(false) }
@@ -295,13 +294,11 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     }
 
     fun doBack() {
-        vm.saveCursor(tfv.selection.start)
+        vm.saveCursor(editorRef.value?.selectionStart ?: 0)
         onBack()
     }
 
-    // Save cursor whenever the screen leaves composition (back gesture, nav pop, etc.)
-    val currentSelection by rememberUpdatedState(tfv.selection.start)
-    DisposableEffect(Unit) { onDispose { vm.saveCursor(currentSelection) } }
+    DisposableEffect(Unit) { onDispose { vm.saveCursor(editorRef.value?.selectionStart ?: 0) } }
 
     if (distractionFree) BackHandler { distractionFree = false }
     if (dirty && !fileWritable && !distractionFree) BackHandler { showDiscardConfirm = true }
@@ -324,16 +321,10 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
         onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
     }
 
-    // Undo/redo — reset when switching file or workspace
-    val undoStack = remember(currentFile?.path, wsActive) { ArrayDeque<TextFieldValue>() }
-    val redoStack = remember(currentFile?.path, wsActive) { ArrayDeque<TextFieldValue>() }
-
     var showToc by remember { mutableStateOf(false) }
     var toc by remember { mutableStateOf<List<TocEntry>>(emptyList()) }
     LaunchedEffect(content, headingMarker, markdownHeadings) {
-        toc = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-            buildToc(content, headingMarker, markdownHeadings)
-        }
+        toc = withContext(Dispatchers.Default) { buildToc(content, headingMarker, markdownHeadings) }
     }
 
     var showFind by remember { mutableStateOf(false) }
@@ -347,6 +338,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     var showWords by remember { mutableStateOf(false) }
     var statsData by remember { mutableStateOf<List<StatEntry>>(emptyList()) }
     var wordsData by remember { mutableStateOf<List<Pair<String, Int>>>(emptyList()) }
+
     val searchMatches = remember(findQuery, content) {
         if (findQuery.length < 2) emptyList()
         else {
@@ -359,10 +351,41 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
             matches.toList()
         }
     }
-    LaunchedEffect(findMatchIndex, searchMatches) {
+
+    // Syntax highlighting — computed async with 300ms debounce to avoid blocking on large files.
+    LaunchedEffect(content, headingMarker, markdownHeadings, hdColorInt, cmtColorInt) {
+        val snap = content
+        delay(300)
+        if (content != snap) return@LaunchedEffect
+        val spans = withContext(Dispatchers.Default) {
+            computeSyntaxSpans(snap, headingMarker, markdownHeadings, hdColorInt, cmtColorInt)
+        }
+        editorRef.value?.editableText?.let { applySyntaxSpansToEditable(it, spans) }
+    }
+
+    // Search highlighting + cursor navigation
+    LaunchedEffect(searchMatches, findMatchIndex) {
+        val editText = editorRef.value ?: return@LaunchedEffect
+        val editable = editText.editableText ?: return@LaunchedEffect
+        editable.getSpans(0, editable.length, SearchBgSpan::class.java).forEach { editable.removeSpan(it) }
+        editable.getSpans(0, editable.length, SearchCurrentBgSpan::class.java).forEach { editable.removeSpan(it) }
+        editable.getSpans(0, editable.length, SearchCurrentFgSpan::class.java).forEach { editable.removeSpan(it) }
+        searchMatches.forEachIndexed { idx, range ->
+            val s = range.first.coerceIn(0, editable.length)
+            val e = (range.last + 1).coerceIn(0, editable.length)
+            if (s < e) {
+                val isCurrent = idx == findMatchIndex.coerceIn(0, searchMatches.lastIndex)
+                if (isCurrent) {
+                    editable.setSpan(SearchCurrentBgSpan(currentMatchBgInt), s, e, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    editable.setSpan(SearchCurrentFgSpan(currentMatchFgInt), s, e, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                } else {
+                    editable.setSpan(SearchBgSpan(matchBgInt), s, e, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+            }
+        }
         if (searchMatches.isNotEmpty()) {
             val range = searchMatches[findMatchIndex.coerceIn(0, searchMatches.lastIndex)]
-            tfv = tfv.copy(selection = TextRange(range.first, range.last + 1))
+            editText.setSelection(range.first, (range.last + 1).coerceAtMost(editable.length))
         }
     }
 
@@ -439,68 +462,78 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
             }
         }
     ) { padding ->
-        val hasTclColors = bgColor != Color.Unspecified && fgColor != Color.Unspecified
-        val editorBg = if (hasTclColors) bgColor else colorScheme.background
-        val editorFg = if (hasTclColors) fgColor else colorScheme.onSurface
-        Box(
-            modifier = Modifier.fillMaxSize().background(editorBg).padding(padding)
-        ) {
-            BasicTextField(
-                value = tfv,
-                onValueChange = { new ->
-                    if (new.text != tfv.text) {
-                        undoStack.addLast(tfv)
-                        if (undoStack.size > 50) undoStack.removeFirst()
-                        redoStack.clear()
+        Box(modifier = Modifier.fillMaxSize().background(editorBg).padding(padding)) {
+
+            AndroidView(
+                factory = { ctx ->
+                    android.widget.EditText(ctx).apply {
+                        inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                            android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                            android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                        imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN
+                        typeface = Typeface.MONOSPACE
+                        gravity = Gravity.TOP or Gravity.START
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        isSingleLine = false
+                        setHorizontallyScrolling(false)
+                        // Capture after inputType (which may replace the default key listener)
+                        originalKeyListener[0] = keyListener
+
+                        addTextChangedListener(object : TextWatcher {
+                            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                            override fun afterTextChanged(s: Editable?) {
+                                if (ignoreTextChange[0]) return
+                                val text = s?.toString() ?: return
+                                vm.updateLiveCursor(selectionStart)
+                                vm.updateContent(text)
+                            }
+                        })
+
+                        setOnKeyListener { _, keyCode, event -> keyHandlerRef[0](keyCode, event) }
+                    }.also { editorRef.value = it }
+                },
+                update = { editText ->
+                    // Only reset text when switching to a different file or workspace.
+                    // Avoids re-setting on every keystroke-triggered recomposition.
+                    val fileKey = "${currentFile?.path}:${wsActive}"
+                    if (editText.tag != fileKey) {
+                        ignoreTextChange[0] = true
+                        editText.setText(content)
+                        editText.setSelection(vm.liveCursor.coerceIn(0, content.length))
+                        editText.tag = fileKey
+                        ignoreTextChange[0] = false
                     }
-                    tfv = new
-                    vm.updateLiveCursor(new.selection.start)
-                    if (new.text != content) vm.updateContent(new.text)
-                },
-                textStyle = TextStyle(
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = fontSize.sp,
-                    lineHeight = (fontSize * 1.5).sp,
-                    color = editorFg
-                ),
-                cursorBrush = SolidColor(colorScheme.primary),
-                visualTransformation = remember(headingMarker, markdownHeadings, hdColor, cmtColor,
-                        searchMatches, findMatchIndex, matchBgColor, currentMatchBgColor, currentMatchFgColor) {
-                    SyntaxVisualTransformation(headingMarker, markdownHeadings, hdColor, cmtColor,
-                        searchMatches, findMatchIndex, matchBgColor, currentMatchBgColor, currentMatchFgColor)
-                },
-                modifier = Modifier.fillMaxSize()
-                    .padding(horizontal = marginWidth.dp, vertical = marginHeight.dp)
-                    .onKeyEvent { event ->
-                        if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                    editText.setTextColor(editorFgInt)
+                    editText.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize.toFloat())
+                    editText.setLineSpacing(0f, 1.5f)
+                    editText.setPadding(marginWidthPx, marginHeightPx, marginWidthPx, marginHeightPx)
+                    editText.keyListener = if (fileWritable) originalKeyListener[0] else null
+
+                    // Update key handler with current compose state values
+                    keyHandlerRef[0] = handler@{ keyCode, event ->
+                        if (event.action != AKeyEvent.ACTION_DOWN) return@handler false
+                        val ctrl = event.isCtrlPressed
                         when {
-                            tocAndroidKey != null && event.key == tocAndroidKey && toc.isNotEmpty() -> {
+                            tocKeyCode != null && keyCode == tocKeyCode && toc.isNotEmpty() -> {
                                 showToc = true; true
                             }
-                            event.isCtrlPressed && event.key == Key.S -> { if (fileWritable) vm.saveFile(); true }
-                            event.isCtrlPressed && event.key == Key.F -> { showFind = true; true }
-                            event.isCtrlPressed && event.key == Key.Q -> { doBack(); true }
-                            event.isCtrlPressed && !event.isShiftPressed && event.key == Key.Z -> {
-                                if (undoStack.isNotEmpty()) {
-                                    redoStack.addLast(tfv)
-                                    val prev = undoStack.removeLast()
-                                    tfv = prev; vm.updateLiveCursor(prev.selection.start); vm.updateContent(prev.text)
-                                }; true
+                            ctrl && keyCode == AKeyEvent.KEYCODE_S -> { if (fileWritable) vm.saveFile(); true }
+                            ctrl && keyCode == AKeyEvent.KEYCODE_F -> { showFind = true; true }
+                            ctrl && keyCode == AKeyEvent.KEYCODE_Q -> {
+                                vm.saveCursor(editText.selectionStart); onBack(); true
                             }
-                            event.isCtrlPressed && (event.key == Key.Y ||
-                                    (event.isShiftPressed && event.key == Key.Z)) -> {
-                                if (redoStack.isNotEmpty()) {
-                                    undoStack.addLast(tfv)
-                                    val next = redoStack.removeLast()
-                                    tfv = next; vm.updateLiveCursor(next.selection.start); vm.updateContent(next.text)
-                                }; true
+                            !ctrl && keyCode == AKeyEvent.KEYCODE_ESCAPE && showFind -> {
+                                showFind = false; findQuery = ""; true
                             }
-                            event.key == Key.Escape && showFind -> { showFind = false; findQuery = ""; true }
-                            event.key == Key.Escape -> { showCmdMode = true; true }
+                            !ctrl && keyCode == AKeyEvent.KEYCODE_ESCAPE -> { showCmdMode = true; true }
                             else -> false
                         }
                     }
+                },
+                modifier = Modifier.fillMaxSize()
             )
+
             if (distractionFree) {
                 IconButton(
                     onClick = { distractionFree = false },
@@ -510,6 +543,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                          tint = editorFg.copy(alpha = 0.35f))
                 }
             }
+
             if (showFind) {
                 Surface(
                     modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(),
@@ -532,6 +566,18 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                             singleLine = true,
                             modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
                                 .focusRequester(findFocusRequester)
+                                .onKeyEvent { event ->
+                                    if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                                    when (event.key) {
+                                        Key.Escape -> { showFind = false; findQuery = ""; true }
+                                        Key.Enter  -> {
+                                            if (searchMatches.isNotEmpty())
+                                                findMatchIndex = (findMatchIndex + 1) % searchMatches.size
+                                            true
+                                        }
+                                        else -> false
+                                    }
+                                }
                         )
                         Text(
                             text = if (searchMatches.isEmpty()) "0/0"
@@ -573,8 +619,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                         fontSize = when (entry.level) { 1 -> 16.sp; 2 -> 15.sp; else -> 14.sp },
                         color = if (entry.level == 1) colorScheme.primary else colorScheme.onSurface,
                         modifier = Modifier.fillMaxWidth().clickable {
-                            val pos = entry.charOffset.coerceIn(0, tfv.text.length)
-                            tfv = tfv.copy(selection = TextRange(pos))
+                            editorRef.value?.setSelection(entry.charOffset.coerceIn(0, content.length))
                             showToc = false
                         }.padding(start = (20 + indent).dp, end = 20.dp, top = 10.dp, bottom = 10.dp)
                     )
@@ -590,7 +635,6 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
             Text("Commands", style = MaterialTheme.typography.titleMedium,
                  modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 16.dp))
 
-            // Timer
             Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically,
@@ -623,29 +667,22 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
 
             Spacer(Modifier.height(12.dp))
 
-            // Workspace
             Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                 Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(
-                        text = "Workspace $wsActive",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontFamily = FontFamily.Monospace
-                    )
+                    Text("Workspace $wsActive", style = MaterialTheme.typography.bodyMedium,
+                         fontFamily = FontFamily.Monospace)
                     OutlinedButton(onClick = {
-                        val offset = tfv.selection.start
+                        val offset = editorRef.value?.selectionStart ?: 0
                         showCmdMode = false
                         vm.toggleWorkspace(offset)
-                    }) {
-                        Text("Switch to WS${if (wsActive == 1) 2 else 1}")
-                    }
+                    }) { Text("Switch to WS${if (wsActive == 1) 2 else 1}") }
                 }
             }
 
             Spacer(Modifier.height(12.dp))
 
-            // Actions row 1
             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(
@@ -666,7 +703,6 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
 
             Spacer(Modifier.height(8.dp))
 
-            // Actions row 2
             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(
@@ -676,8 +712,24 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 ) { Text("TOC") }
                 OutlinedButton(
                     onClick = {
-                        val newTfv = applyHeading(tfv, headingMarker)
-                        tfv = newTfv; vm.updateContent(newTfv.text); showCmdMode = false
+                        val editText = editorRef.value
+                        if (editText != null && headingMarker.isNotEmpty()) {
+                            val result = applyHeadingResult(
+                                editText.text.toString(),
+                                editText.selectionStart,
+                                editText.selectionEnd,
+                                headingMarker
+                            )
+                            if (result != null) {
+                                val (newText, newStart, newEnd) = result
+                                ignoreTextChange[0] = true
+                                editText.setText(newText)
+                                editText.setSelection(newStart, newEnd)
+                                ignoreTextChange[0] = false
+                                vm.updateContent(newText)
+                            }
+                        }
+                        showCmdMode = false
                     },
                     enabled = headingMarker.isNotEmpty(),
                     modifier = Modifier.weight(1f)
@@ -688,7 +740,6 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
         }
     }
 
-    // Stats dialog
     if (showStats) {
         AlertDialog(
             onDismissRequest = { showStats = false },
@@ -717,7 +768,6 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
         )
     }
 
-    // Timer alert
     if (timerAlertPending) {
         AlertDialog(
             onDismissRequest = { vm.dismissTimerAlert() },
@@ -727,7 +777,6 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
         )
     }
 
-    // Read-only alert
     if (showReadOnlyAlert) {
         AlertDialog(
             onDismissRequest = { showReadOnlyAlert = false },
@@ -741,7 +790,6 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
         )
     }
 
-    // Discard confirmation
     if (showDiscardConfirm) {
         AlertDialog(
             onDismissRequest = { showDiscardConfirm = false },
@@ -757,7 +805,6 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
         )
     }
 
-    // Word occurrences dialog
     if (showWords) {
         AlertDialog(
             onDismissRequest = { showWords = false },

@@ -167,6 +167,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     private var timerJob: Job? = null
     private var autosaveJob: Job? = null
+    private var wordCountJob: Job? = null
     private var externalUri: Uri? = null
     private var externalWritable = false
 
@@ -403,13 +404,19 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         if (text == _content.value) return
         _content.value = text
         _dirty.value = true
-        val wc = countWords(text)
-        _wordCount.value = wc
-        val path = _currentFile.value?.path
-        if (path != null) {
-            appState = StateStore.updateDaily(appState, path, wc, today())
-        }
         refreshStatus()
+        // Debounce word count — countWords() on 500K+ chars is too slow for every keystroke.
+        wordCountJob?.cancel()
+        wordCountJob = viewModelScope.launch {
+            delay(1000)
+            val wc = withContext(Dispatchers.Default) { countWords(text) }
+            if (_content.value == text) {
+                _wordCount.value = wc
+                val path = _currentFile.value?.path
+                if (path != null) appState = StateStore.updateDaily(appState, path, wc, today())
+                refreshStatus()
+            }
+        }
     }
 
     fun createFile(name: String) {
@@ -910,6 +917,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         timerJob?.cancel()
         autosaveJob?.cancel()
+        wordCountJob?.cancel()
     }
 
     private fun checkStoragePermission(): Boolean {

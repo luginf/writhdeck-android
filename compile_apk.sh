@@ -8,4 +8,4 @@
 
 ./gradlew assembleDebug 
 
-printf "app/build/outputs/apk/debug/writhdeck-debug.apk" 
+printf "=>\n\napp/build/outputs/apk/debug/writhdeck-debug.apk \n\n" 
