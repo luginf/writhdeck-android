@@ -55,7 +55,10 @@ data class SettingsData(
     val timerDuration: Int = 25,
     val timerSound: Boolean = false,
     val timerAlert: Boolean = false,
-    val chronoShow: Boolean = false
+    val chronoShow: Boolean = false,
+    val statusLeft: String = "ws filename dirty",
+    val statusCenter: String = "words",
+    val statusRight: String = "timer"
 )
 
 class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
@@ -761,36 +764,42 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         (BUILTIN_SCHEMES.keys + config.customSchemes.keys.filter { it !in BUILTIN_SCHEMES }).toList()
 
     fun getSettingsData() = SettingsData(
-        scheme          = config.scheme,
-        fontSize        = config.fontSize,
-        marginWidth     = config.marginWidth,
-        marginHeight    = config.marginHeight,
-        wordGoal        = config.wordGoal,
-        headingMarker   = config.headingMarker,
-        autosaveEnabled = config.autosaveEnabled,
+        scheme           = config.scheme,
+        fontSize         = config.fontSize,
+        marginWidth      = config.marginWidth,
+        marginHeight     = config.marginHeight,
+        wordGoal         = config.wordGoal,
+        headingMarker    = config.headingMarker,
+        autosaveEnabled  = config.autosaveEnabled,
         autosaveInterval = config.autosaveInterval,
-        timerType       = config.timerType,
-        timerDuration   = config.timerDuration,
-        timerSound      = config.timerSound,
-        timerAlert      = config.timerAlert,
-        chronoShow      = config.chronoShow
+        timerType        = config.timerType,
+        timerDuration    = config.timerDuration,
+        timerSound       = config.timerSound,
+        timerAlert       = config.timerAlert,
+        chronoShow       = config.chronoShow,
+        statusLeft       = config.statusLeft,
+        statusCenter     = config.statusCenter,
+        statusRight      = config.statusRight
     )
 
     fun applySettings(s: SettingsData) {
         config = config.copy(
-            scheme          = s.scheme,
-            fontSize        = s.fontSize,
-            marginWidth     = s.marginWidth,
-            marginHeight    = s.marginHeight,
-            wordGoal        = s.wordGoal,
-            headingMarker   = s.headingMarker,
-            autosaveEnabled = s.autosaveEnabled,
+            scheme           = s.scheme,
+            fontSize         = s.fontSize,
+            marginWidth      = s.marginWidth,
+            marginHeight     = s.marginHeight,
+            wordGoal         = s.wordGoal,
+            headingMarker    = s.headingMarker,
+            autosaveEnabled  = s.autosaveEnabled,
             autosaveInterval = s.autosaveInterval,
-            timerType       = s.timerType,
-            timerDuration   = s.timerDuration,
-            timerSound      = s.timerSound,
-            timerAlert      = s.timerAlert,
-            chronoShow      = s.chronoShow
+            timerType        = s.timerType,
+            timerDuration    = s.timerDuration,
+            timerSound       = s.timerSound,
+            timerAlert       = s.timerAlert,
+            chronoShow       = s.chronoShow,
+            statusLeft       = s.statusLeft,
+            statusCenter     = s.statusCenter,
+            statusRight      = s.statusRight
         )
         applyConfig()
         val activeProfile = config.activeProfile
@@ -810,7 +819,10 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 "timer_duration"    to s.timerDuration.toString(),
                 "timer_sound"       to b(s.timerSound),
                 "timer_alert"       to b(s.timerAlert),
-                "chrono_show"       to b(s.chronoShow)
+                "chrono_show"       to b(s.chronoShow),
+                "status_left"       to s.statusLeft,
+                "status_center"     to s.statusCenter,
+                "status_right"      to s.statusRight
             )
             text = IniParser.patchProfileKey(text, activeProfile, "scheme", s.scheme)
             // Ensure all built-in scheme sections are present (add missing ones)
@@ -848,20 +860,27 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     // --- Helpers ---
 
     private fun refreshStatus() {
-        val name = _currentFile.value?.name ?: ""
-        val ws = _wsActive.value
-        val wsPrefix = if (_wsDualMode.value) "[$ws] " else ""
-        val left = if (name.isEmpty()) "" else if (_dirty.value) "$wsPrefix$name *" else "$wsPrefix$name"
-
-        val wc = _wordCount.value
-        val goal = config.wordGoal
-        val center = if (goal > 0) "$wc / $goal" else "$wc w"
-
-        val showTimer = _timerLastTick.value != 0L || _timerActive.value
-        val right = if (showTimer) buildTimerDisplay() else ""
-
-        _statusBar.value = StatusBar(left, center, right)
+        _statusBar.value = StatusBar(
+            buildStatusSegment(config.statusLeft),
+            buildStatusSegment(config.statusCenter),
+            buildStatusSegment(config.statusRight)
+        )
     }
+
+    // Tokens: ws filename dirty words goal timer — unknown tokens are literal text.
+    private fun buildStatusSegment(tokens: String): String =
+        tokens.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }.joinToString("") { tok ->
+            when (tok) {
+                "ws"       -> if (_wsDualMode.value) "[${_wsActive.value}] " else ""
+                "filename" -> _currentFile.value?.name ?: ""
+                "dirty"    -> if (_dirty.value) " *" else ""
+                "words"    -> "${_wordCount.value} w"
+                "goal"     -> { val wc = _wordCount.value; val g = config.wordGoal
+                                if (g > 0) "$wc/$g" else "$wc w" }
+                "timer"    -> if (_timerLastTick.value != 0L || _timerActive.value) buildTimerDisplay() else ""
+                else       -> tok
+            }
+        }
 
     private fun buildTimerDisplay(): String {
         val secs = _timerRemaining.value
@@ -871,8 +890,13 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         return if (_timerActive.value) "[$display]" else " $display"
     }
 
-    private fun countWords(text: String): Int =
-        text.trim().split(Regex("\\s+")).count { it.isNotEmpty() }
+    private fun countWords(text: String): Int {
+        var count = 0; var inWord = false
+        for (c in text) {
+            if (!c.isWhitespace()) { if (!inWord) count++; inWord = true } else inWord = false
+        }
+        return count
+    }
 
     private fun today(): String =
         SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())

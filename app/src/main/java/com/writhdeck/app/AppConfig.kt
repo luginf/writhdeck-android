@@ -26,7 +26,10 @@ data class AppConfig(
     val customSchemes: Map<String, SchemeColors> = emptyMap(),
     val fontSize: Int = 16,
     val autosaveEnabled: Boolean = true,
-    val autosaveInterval: Int = 1
+    val autosaveInterval: Int = 1,
+    val statusLeft: String = "ws filename dirty",
+    val statusCenter: String = "words",
+    val statusRight: String = "timer"
 ) {
     fun schemeColors(): SchemeColors =
         customSchemes[scheme] ?: BUILTIN_SCHEMES[scheme] ?: BUILTIN_SCHEMES["default"]!!
@@ -117,7 +120,10 @@ object IniParser {
             customSchemes    = customSchemes,
             fontSize         = int("font_size", 16).coerceIn(10, 32),
             autosaveEnabled  = bool("autosave_enabled", true),
-            autosaveInterval = int("autosave_interval", 1).coerceAtLeast(1)
+            autosaveInterval = int("autosave_interval", 1).coerceAtLeast(1),
+            statusLeft       = str("status_left",   "ws filename dirty"),
+            statusCenter     = str("status_center", "words"),
+            statusRight      = str("status_right",  "timer")
         )
     }
 
@@ -134,6 +140,11 @@ object IniParser {
             appendLine("cursor_restore = yes")
             appendLine("autosave_enabled = yes")
             appendLine("autosave_interval = 1")
+            appendLine()
+            appendLine("= status_bar =")
+            appendLine("status_left = ${config.statusLeft}")
+            appendLine("status_center = ${config.statusCenter}")
+            appendLine("status_right = ${config.statusRight}")
             appendLine()
             appendLine("= timer =")
             appendLine("timer_type = ${config.timerType}")

@@ -82,6 +82,11 @@ fun SettingsScreen(
             SwitchSettingRow("Alert dialog", s.timerAlert) { s = s.copy(timerAlert = it) }
             SwitchSettingRow("Show in status bar", s.chronoShow) { s = s.copy(chronoShow = it) }
 
+            SettingsSection("Status bar")
+            StringSettingRow("Left", s.statusLeft) { s = s.copy(statusLeft = it) }
+            StringSettingRow("Center", s.statusCenter) { s = s.copy(statusCenter = it) }
+            StringSettingRow("Right", s.statusRight) { s = s.copy(statusRight = it) }
+
             Spacer(Modifier.height(16.dp))
             OutlinedButton(
                 onClick = { vm.applySettings(s); onNavigateSchemes() },
@@ -207,10 +212,9 @@ private fun StringSettingRow(
             value = value,
             onValueChange = onChange,
             singleLine = true,
-            modifier = Modifier.width(80.dp),
+            modifier = Modifier.weight(2f),
             textStyle = MaterialTheme.typography.bodyMedium.copy(
-                fontFamily = FontFamily.Monospace,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                fontFamily = FontFamily.Monospace
             )
         )
     }

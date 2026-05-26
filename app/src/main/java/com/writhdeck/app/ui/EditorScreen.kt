@@ -30,6 +30,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -104,40 +106,72 @@ private class SyntaxVisualTransformation(
     private val mdRe = if (markdownHeadings) Regex("^#{1,6}\\s") else null
     private val mLen = headingMarker.length
 
+    // Cache syntax-only result — reused when only selection/search changes, not text content.
+    private var cachedInputText: String = ""
+    private var cachedSyntaxAnnotated: AnnotatedString? = null
+
     override fun filter(text: AnnotatedString): TransformedText {
-        val spans = mutableListOf<Triple<Int, Int, SpanStyle>>()
+        val syntaxAnnotated = if (text.text == cachedInputText && cachedSyntaxAnnotated != null) {
+            cachedSyntaxAnnotated!!
+        } else {
+            buildSyntaxAnnotated(text).also {
+                cachedInputText = text.text
+                cachedSyntaxAnnotated = it
+            }
+        }
+        if (searchRanges.isEmpty()) return TransformedText(syntaxAnnotated, OffsetMapping.Identity)
+        val result = buildAnnotatedString {
+            append(syntaxAnnotated)
+            searchRanges.forEachIndexed { idx, range ->
+                val s = range.first.coerceIn(0, text.length)
+                val e = (range.last + 1).coerceIn(0, text.length)
+                if (s < e) addStyle(
+                    if (idx == currentMatchIdx)
+                        SpanStyle(background = currentMatchBgColor, color = currentMatchFgColor)
+                    else SpanStyle(background = matchBgColor), s, e
+                )
+            }
+        }
+        return TransformedText(result, OffsetMapping.Identity)
+    }
+
+    private fun buildSyntaxAnnotated(text: AnnotatedString): AnnotatedString {
+        data class Span(val start: Int, val end: Int, val style: SpanStyle)
+        val spans = mutableListOf<Span>()
         var offset = 0
-        for (line in text.text.lines()) {
-            val trimmed = line.trim()
-            val end = (offset + line.length).coerceAtMost(text.length)
-            val isComment = trimmed.startsWith("%") || trimmed.startsWith("//") || trimmed.startsWith(">")
-            val isHeading = (mLen > 0 && trimmed.startsWith(headingMarker) && trimmed.endsWith(headingMarker) && trimmed.length > mLen) ||
-                            (mdRe != null && mdRe.containsMatchIn(trimmed))
-            when {
-                isComment && commentColor != Color.Unspecified && end > offset ->
-                    spans.add(Triple(offset, end, SpanStyle(color = commentColor)))
-                isHeading && headingColor != Color.Unspecified && end > offset ->
-                    spans.add(Triple(offset, end, SpanStyle(color = headingColor)))
+        var lineStart = 0
+        val raw = text.text
+        while (lineStart <= raw.length) {
+            val lineEnd = raw.indexOf('\n', lineStart).let { if (it < 0) raw.length else it }
+            var ts = lineStart; while (ts < lineEnd && raw[ts] == ' ') ts++
+            val end = lineEnd.coerceAtMost(raw.length)
+            if (end > lineStart) {
+                val isComment = ts < lineEnd && (
+                    raw[ts] == '%' || raw[ts] == '>' ||
+                    (raw[ts] == '/' && ts + 1 < lineEnd && raw[ts + 1] == '/')
+                )
+                val isHeading = !isComment && mLen > 0 && lineEnd - lineStart > mLen &&
+                    raw.startsWith(headingMarker, ts) && run {
+                        var te = lineEnd - 1
+                        while (te > ts && raw[te] == ' ') te--
+                        te >= ts + mLen && raw.startsWith(headingMarker, te - mLen + 1)
+                    } || (!isComment && mdRe != null && ts < lineEnd &&
+                        mdRe.containsMatchIn(raw.substring(lineStart, lineEnd)))
+                when {
+                    isComment && commentColor != Color.Unspecified ->
+                        spans.add(Span(lineStart, end, SpanStyle(color = commentColor)))
+                    isHeading && headingColor != Color.Unspecified ->
+                        spans.add(Span(lineStart, end, SpanStyle(color = headingColor)))
+                }
             }
-            offset += line.length + 1
+            lineStart = lineEnd + 1
+            offset += lineEnd - offset + 1
         }
-        searchRanges.forEachIndexed { idx, range ->
-            val s = range.first.coerceIn(0, text.length)
-            val e = (range.last + 1).coerceIn(0, text.length)
-            if (s < e) {
-                val style = if (idx == currentMatchIdx)
-                    SpanStyle(background = currentMatchBgColor, color = currentMatchFgColor)
-                else
-                    SpanStyle(background = matchBgColor)
-                spans.add(Triple(s, e, style))
-            }
-        }
-        if (spans.isEmpty()) return TransformedText(text, OffsetMapping.Identity)
-        val annotated = buildAnnotatedString {
+        if (spans.isEmpty()) return text
+        return buildAnnotatedString {
             append(text)
             for ((s, e, style) in spans) addStyle(style, s, e)
         }
-        return TransformedText(annotated, OffsetMapping.Identity)
     }
 }
 
@@ -290,20 +324,29 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
         onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
     }
 
+    // Undo/redo — reset when switching file or workspace
+    val undoStack = remember(currentFile?.path, wsActive) { ArrayDeque<TextFieldValue>() }
+    val redoStack = remember(currentFile?.path, wsActive) { ArrayDeque<TextFieldValue>() }
+
     var showToc by remember { mutableStateOf(false) }
-    val toc = remember(content, headingMarker, markdownHeadings) {
-        buildToc(content, headingMarker, markdownHeadings)
+    var toc by remember { mutableStateOf<List<TocEntry>>(emptyList()) }
+    LaunchedEffect(content, headingMarker, markdownHeadings) {
+        toc = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            buildToc(content, headingMarker, markdownHeadings)
+        }
     }
+
+    var showFind by remember { mutableStateOf(false) }
+    var findQuery by remember { mutableStateOf("") }
+    var findMatchIndex by remember { mutableStateOf(0) }
+    val findFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(showFind) { if (showFind) findFocusRequester.requestFocus() }
 
     var showCmdMode by remember { mutableStateOf(false) }
     var showStats by remember { mutableStateOf(false) }
     var showWords by remember { mutableStateOf(false) }
     var statsData by remember { mutableStateOf<List<StatEntry>>(emptyList()) }
     var wordsData by remember { mutableStateOf<List<Pair<String, Int>>>(emptyList()) }
-
-    var showFind by remember { mutableStateOf(false) }
-    var findQuery by remember { mutableStateOf("") }
-    var findMatchIndex by remember { mutableStateOf(0) }
     val searchMatches = remember(findQuery, content) {
         if (findQuery.length < 2) emptyList()
         else {
@@ -405,6 +448,11 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
             BasicTextField(
                 value = tfv,
                 onValueChange = { new ->
+                    if (new.text != tfv.text) {
+                        undoStack.addLast(tfv)
+                        if (undoStack.size > 50) undoStack.removeFirst()
+                        redoStack.clear()
+                    }
                     tfv = new
                     vm.updateLiveCursor(new.selection.start)
                     if (new.text != content) vm.updateContent(new.text)
@@ -431,6 +479,22 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                             }
                             event.isCtrlPressed && event.key == Key.S -> { if (fileWritable) vm.saveFile(); true }
                             event.isCtrlPressed && event.key == Key.F -> { showFind = true; true }
+                            event.isCtrlPressed && event.key == Key.Q -> { doBack(); true }
+                            event.isCtrlPressed && !event.isShiftPressed && event.key == Key.Z -> {
+                                if (undoStack.isNotEmpty()) {
+                                    redoStack.addLast(tfv)
+                                    val prev = undoStack.removeLast()
+                                    tfv = prev; vm.updateLiveCursor(prev.selection.start); vm.updateContent(prev.text)
+                                }; true
+                            }
+                            event.isCtrlPressed && (event.key == Key.Y ||
+                                    (event.isShiftPressed && event.key == Key.Z)) -> {
+                                if (redoStack.isNotEmpty()) {
+                                    undoStack.addLast(tfv)
+                                    val next = redoStack.removeLast()
+                                    tfv = next; vm.updateLiveCursor(next.selection.start); vm.updateContent(next.text)
+                                }; true
+                            }
                             event.key == Key.Escape && showFind -> { showFind = false; findQuery = ""; true }
                             event.key == Key.Escape -> { showCmdMode = true; true }
                             else -> false
@@ -467,6 +531,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                             cursorBrush = SolidColor(colorScheme.primary),
                             singleLine = true,
                             modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                                .focusRequester(findFocusRequester)
                         )
                         Text(
                             text = if (searchMatches.isEmpty()) "0/0"
