@@ -150,9 +150,6 @@ fun BrowserScreen(
                     }) {
                         Icon(Icons.Default.Keyboard, contentDescription = "Keyboard shortcuts")
                     }
-                    IconButton(onClick = onNavigateSchemes) {
-                        Icon(Icons.Default.Palette, contentDescription = "Color schemes")
-                    }
                     IconButton(onClick = onNavigateSettings) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }

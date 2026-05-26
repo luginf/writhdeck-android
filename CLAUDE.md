@@ -136,7 +136,7 @@ EditorScreen behavior when `!fileWritable`:
 
 ### Margins
 
-Desktop configs may have `margin_width` up to 180. Always `coerceIn(0, 48)` on Android to prevent zero-width text area (enforced in `IniParser.parse()`).
+No upper limit enforced by the parser — `IniParser.parse()` uses `coerceAtLeast(0)` only. Settings UI caps at 200 dp.
 
 ### Autosave
 

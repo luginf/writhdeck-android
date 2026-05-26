@@ -59,6 +59,9 @@ fun AppNavigation(vm: WrithdeckViewModel = viewModel(), onRequestPermission: () 
                 onEditIni = {
                     vm.openIniFile()
                     nav.navigate("editor") { launchSingleTop = true }
+                },
+                onNavigateSchemes = {
+                    nav.navigate("schemes") { launchSingleTop = true }
                 }
             )
         }

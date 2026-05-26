@@ -43,6 +43,7 @@ data class WsSnapshot(
 }
 
 data class SettingsData(
+    val scheme: String = "default",
     val fontSize: Int = 16,
     val marginWidth: Int = 16,
     val marginHeight: Int = 16,
@@ -143,6 +144,11 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     // Cursor restore: set before currentFile changes so remember(path, wsActive) picks it up.
     private val _initialCursorOffset = MutableStateFlow(0)
     val initialCursorOffset = _initialCursorOffset.asStateFlow()
+
+    // Live cursor — plain var updated on every selection change; survives rotation without StateFlow overhead.
+    var liveCursor: Int = 0
+        private set
+    fun updateLiveCursor(offset: Int) { liveCursor = offset }
 
     // Workspace
     private val _wsActive = MutableStateFlow(1)
@@ -321,6 +327,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             val cursor = appState.cursors[entry.path]
             _initialCursorOffset.value = if (cursor != null)
                 linecolToOffset(text, cursor.first, cursor.second) else 0
+            liveCursor = _initialCursorOffset.value
             _currentFile.value = entry
             _dirty.value = false
             val wc = countWords(text)
@@ -372,6 +379,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             val cursor = appState.cursors[scratchFile.absolutePath]
             _initialCursorOffset.value = if (cursor != null)
                 linecolToOffset(text, cursor.first, cursor.second) else 0
+            liveCursor = _initialCursorOffset.value
             _currentFile.value = DocEntry("scratchpad.txt", scratchFile.absolutePath)
             _dirty.value = false
             _wordCount.value = countWords(text)
@@ -627,6 +635,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         }
         // Set initialCursorOffset before currentFile so remember(path, wsActive) picks it up.
         _initialCursorOffset.value = next.cursorOffset
+        liveCursor = next.cursorOffset
         _content.value = next.content
         _currentFile.value = next.file
         _dirty.value = next.dirty
@@ -748,7 +757,11 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     // --- Settings ---
 
+    fun getAllSchemeNames(): List<String> =
+        (BUILTIN_SCHEMES.keys + config.customSchemes.keys.filter { it !in BUILTIN_SCHEMES }).toList()
+
     fun getSettingsData() = SettingsData(
+        scheme          = config.scheme,
         fontSize        = config.fontSize,
         marginWidth     = config.marginWidth,
         marginHeight    = config.marginHeight,
@@ -765,6 +778,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     fun applySettings(s: SettingsData) {
         config = config.copy(
+            scheme          = s.scheme,
             fontSize        = s.fontSize,
             marginWidth     = s.marginWidth,
             marginHeight    = s.marginHeight,
@@ -779,11 +793,12 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             chronoShow      = s.chronoShow
         )
         applyConfig()
+        val activeProfile = config.activeProfile
         viewModelScope.launch(Dispatchers.IO) {
             val iniFile = File(docsDir, "writhdeck.ini")
-            val text = if (iniFile.exists()) iniFile.readText() else IniParser.write(config)
             fun b(v: Boolean) = if (v) "yes" else "no"
-            iniFile.writeText(IniParser.patchKeys(text,
+            var text = if (iniFile.exists()) iniFile.readText() else IniParser.write(config)
+            text = IniParser.patchKeys(text,
                 "font_size"         to s.fontSize.toString(),
                 "margin_width"      to s.marginWidth.toString(),
                 "margin_height"     to s.marginHeight.toString(),
@@ -796,7 +811,15 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 "timer_sound"       to b(s.timerSound),
                 "timer_alert"       to b(s.timerAlert),
                 "chrono_show"       to b(s.chronoShow)
-            ))
+            )
+            text = IniParser.patchProfileKey(text, activeProfile, "scheme", s.scheme)
+            // Ensure all built-in scheme sections are present (add missing ones)
+            for ((name, colors) in BUILTIN_SCHEMES) {
+                if (!text.contains("= scheme: $name =")) {
+                    text = IniParser.writeCustomScheme(text, name, colors)
+                }
+            }
+            iniFile.writeText(text)
         }
     }
 

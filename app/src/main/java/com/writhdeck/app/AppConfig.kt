@@ -3,7 +3,8 @@ package com.writhdeck.app
 data class ThemeColors(
     val bg: String = "#1a1a1a",
     val fg: String = "#e8e8e8",
-    val headingColor: String = "#c8a060"
+    val headingColor: String = "#c8a060",
+    val commentColor: String = "#555555"
 )
 
 data class AppConfig(
@@ -32,8 +33,8 @@ data class AppConfig(
 
     fun themeColors(useDark: Boolean): ThemeColors {
         val c = schemeColors()
-        return if (useDark) ThemeColors(bg = c.bg, fg = c.fg, headingColor = c.heading)
-               else         ThemeColors(bg = c.bgAlt, fg = c.fgAlt, headingColor = c.headingAlt)
+        return if (useDark) ThemeColors(bg = c.bg, fg = c.fg, headingColor = c.heading, commentColor = c.comment)
+               else         ThemeColors(bg = c.bgAlt, fg = c.fgAlt, headingColor = c.headingAlt, commentColor = c.commentAlt)
     }
 
     fun timerDurationSecs(): Int = timerDuration * 60
@@ -98,8 +99,8 @@ object IniParser {
             androidDarkMode  = str("android_dark_mode", "auto").let {
                 if (it == "auto" || it == "yes" || it == "no") it else "auto"
             },
-            marginWidth      = int("margin_width", 16).coerceIn(0, 48),
-            marginHeight     = int("margin_height", 16).coerceIn(0, 32),
+            marginWidth      = int("margin_width", 16).coerceAtLeast(0),
+            marginHeight     = int("margin_height", 16).coerceAtLeast(0),
             headingMarker    = str("heading_marker", "="),
             markdownHeadings = bool("markdown_headings", true),
             timerType        = str("timer_type", "countdown").let {
@@ -164,8 +165,12 @@ object IniParser {
             appendLine("markdown_headings = no")
             appendLine("margin_width = 32")
             appendLine("margin_height = 24")
-            append("word_goal = 1000")
-        } + "\n"
+            appendLine("word_goal = 1000")
+        } + BUILTIN_SCHEMES.entries.joinToString("") { (name, colors) ->
+            schemeToIniSection(name, colors) + "\n"
+        } + config.customSchemes.entries
+            .filter { it.key !in BUILTIN_SCHEMES }
+            .joinToString("") { (name, colors) -> schemeToIniSection(name, colors) + "\n" }
     }
 
     /** Patch specific key=value pairs in existing INI text, preserving all other content. */

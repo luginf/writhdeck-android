@@ -11,13 +11,17 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -86,27 +90,47 @@ fun parseHexColor(hex: String): Color {
     } catch (_: Exception) { Color.Unspecified }
 }
 
-private class HeadingVisualTransformation(
+private class SyntaxVisualTransformation(
     private val headingMarker: String,
     private val markdownHeadings: Boolean,
-    private val headingColor: Color
+    private val headingColor: Color,
+    private val commentColor: Color,
+    private val searchRanges: List<IntRange>,
+    private val currentMatchIdx: Int,
+    private val matchBgColor: Color,
+    private val currentMatchBgColor: Color,
+    private val currentMatchFgColor: Color
 ) : VisualTransformation {
     private val mdRe = if (markdownHeadings) Regex("^#{1,6}\\s") else null
+    private val mLen = headingMarker.length
 
     override fun filter(text: AnnotatedString): TransformedText {
-        if (headingColor == Color.Unspecified) return TransformedText(text, OffsetMapping.Identity)
-        val mLen = headingMarker.length
         val spans = mutableListOf<Triple<Int, Int, SpanStyle>>()
         var offset = 0
         for (line in text.text.lines()) {
             val trimmed = line.trim()
-            val isH = (mLen > 0 && trimmed.startsWith(headingMarker) && trimmed.endsWith(headingMarker)) ||
-                      (mdRe != null && mdRe.containsMatchIn(trimmed))
-            if (isH) {
-                val end = (offset + line.length).coerceAtMost(text.length)
-                if (end > offset) spans.add(Triple(offset, end, SpanStyle(color = headingColor)))
+            val end = (offset + line.length).coerceAtMost(text.length)
+            val isComment = trimmed.startsWith("%") || trimmed.startsWith("//") || trimmed.startsWith(">")
+            val isHeading = (mLen > 0 && trimmed.startsWith(headingMarker) && trimmed.endsWith(headingMarker) && trimmed.length > mLen) ||
+                            (mdRe != null && mdRe.containsMatchIn(trimmed))
+            when {
+                isComment && commentColor != Color.Unspecified && end > offset ->
+                    spans.add(Triple(offset, end, SpanStyle(color = commentColor)))
+                isHeading && headingColor != Color.Unspecified && end > offset ->
+                    spans.add(Triple(offset, end, SpanStyle(color = headingColor)))
             }
             offset += line.length + 1
+        }
+        searchRanges.forEachIndexed { idx, range ->
+            val s = range.first.coerceIn(0, text.length)
+            val e = (range.last + 1).coerceIn(0, text.length)
+            if (s < e) {
+                val style = if (idx == currentMatchIdx)
+                    SpanStyle(background = currentMatchBgColor, color = currentMatchFgColor)
+                else
+                    SpanStyle(background = matchBgColor)
+                spans.add(Triple(s, e, style))
+            }
         }
         if (spans.isEmpty()) return TransformedText(text, OffsetMapping.Identity)
         val annotated = buildAnnotatedString {
@@ -197,7 +221,6 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
 
     val wsActive by vm.wsActive.collectAsStateWithLifecycle()
     val wsDualMode by vm.wsDualMode.collectAsStateWithLifecycle()
-    val initialCursorOffset by vm.initialCursorOffset.collectAsStateWithLifecycle()
 
     val themeColors by vm.themeColors.collectAsStateWithLifecycle()
     val darkPref by vm.darkModePreference.collectAsStateWithLifecycle()
@@ -214,14 +237,18 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     val bgColor = parseHexColor(themeColors.bg)
     val fgColor = parseHexColor(themeColors.fg)
     val hdColor = parseHexColor(themeColors.headingColor)
+    val cmtColor = parseHexColor(themeColors.commentColor)
     val colorScheme = MaterialTheme.colorScheme
+    val matchBgColor = colorScheme.tertiaryContainer
+    val currentMatchBgColor = colorScheme.tertiary
+    val currentMatchFgColor = colorScheme.onTertiary
     val scope = rememberCoroutineScope()
 
     // Reset when file changes OR workspace switches.
-    // initialCursorOffset is set before currentFile/wsActive change so it's visible here.
+    // vm.liveCursor is a plain var kept in sync on every selection change — survives rotation.
     var tfv by remember(currentFile?.path, wsActive) {
         mutableStateOf(
-            TextFieldValue(content, selection = TextRange(initialCursorOffset.coerceIn(0, content.length)))
+            TextFieldValue(content, selection = TextRange(vm.liveCursor.coerceIn(0, content.length)))
         )
     }
 
@@ -237,6 +264,10 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
         vm.saveCursor(tfv.selection.start)
         onBack()
     }
+
+    // Save cursor whenever the screen leaves composition (back gesture, nav pop, etc.)
+    val currentSelection by rememberUpdatedState(tfv.selection.start)
+    DisposableEffect(Unit) { onDispose { vm.saveCursor(currentSelection) } }
 
     if (distractionFree) BackHandler { distractionFree = false }
     if (dirty && !fileWritable && !distractionFree) BackHandler { showDiscardConfirm = true }
@@ -269,6 +300,28 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     var showWords by remember { mutableStateOf(false) }
     var statsData by remember { mutableStateOf<List<StatEntry>>(emptyList()) }
     var wordsData by remember { mutableStateOf<List<Pair<String, Int>>>(emptyList()) }
+
+    var showFind by remember { mutableStateOf(false) }
+    var findQuery by remember { mutableStateOf("") }
+    var findMatchIndex by remember { mutableStateOf(0) }
+    val searchMatches = remember(findQuery, content) {
+        if (findQuery.length < 2) emptyList()
+        else {
+            val lower = content.lowercase(); val query = findQuery.lowercase()
+            val matches = mutableListOf<IntRange>(); var idx = 0
+            while (idx < lower.length) {
+                val found = lower.indexOf(query, idx); if (found < 0) break
+                matches.add(found until found + query.length); idx = found + 1
+            }
+            matches.toList()
+        }
+    }
+    LaunchedEffect(findMatchIndex, searchMatches) {
+        if (searchMatches.isNotEmpty()) {
+            val range = searchMatches[findMatchIndex.coerceIn(0, searchMatches.lastIndex)]
+            tfv = tfv.copy(selection = TextRange(range.first, range.last + 1))
+        }
+    }
 
     val titleText = buildString {
         if (wsDualMode) append("[$wsActive] ")
@@ -308,6 +361,9 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                     }
                     IconButton(onClick = { vm.saveFile() }, enabled = dirty && fileWritable) {
                         Icon(Icons.Filled.Save, contentDescription = "Save")
+                    }
+                    IconButton(onClick = { showFind = !showFind }) {
+                        Icon(Icons.Filled.Search, contentDescription = "Find")
                     }
                     IconButton(onClick = { showCmdMode = true }) {
                         Icon(Icons.Filled.Menu, contentDescription = "Commands")
@@ -350,6 +406,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 value = tfv,
                 onValueChange = { new ->
                     tfv = new
+                    vm.updateLiveCursor(new.selection.start)
                     if (new.text != content) vm.updateContent(new.text)
                 },
                 textStyle = TextStyle(
@@ -359,18 +416,22 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                     color = editorFg
                 ),
                 cursorBrush = SolidColor(colorScheme.primary),
-                visualTransformation = remember(headingMarker, markdownHeadings, hdColor) {
-                    HeadingVisualTransformation(headingMarker, markdownHeadings, hdColor)
+                visualTransformation = remember(headingMarker, markdownHeadings, hdColor, cmtColor,
+                        searchMatches, findMatchIndex, matchBgColor, currentMatchBgColor, currentMatchFgColor) {
+                    SyntaxVisualTransformation(headingMarker, markdownHeadings, hdColor, cmtColor,
+                        searchMatches, findMatchIndex, matchBgColor, currentMatchBgColor, currentMatchFgColor)
                 },
                 modifier = Modifier.fillMaxSize()
                     .padding(horizontal = marginWidth.dp, vertical = marginHeight.dp)
-                    .imePadding()
                     .onKeyEvent { event ->
                         if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                         when {
                             tocAndroidKey != null && event.key == tocAndroidKey && toc.isNotEmpty() -> {
                                 showToc = true; true
                             }
+                            event.isCtrlPressed && event.key == Key.S -> { if (fileWritable) vm.saveFile(); true }
+                            event.isCtrlPressed && event.key == Key.F -> { showFind = true; true }
+                            event.key == Key.Escape && showFind -> { showFind = false; findQuery = ""; true }
                             event.key == Key.Escape -> { showCmdMode = true; true }
                             else -> false
                         }
@@ -383,6 +444,50 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 ) {
                     Icon(Icons.Filled.FullscreenExit, contentDescription = "Exit distraction-free",
                          tint = editorFg.copy(alpha = 0.35f))
+                }
+            }
+            if (showFind) {
+                Surface(
+                    modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(),
+                    tonalElevation = 8.dp,
+                    shadowElevation = 4.dp
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        BasicTextField(
+                            value = findQuery,
+                            onValueChange = { findQuery = it; findMatchIndex = 0 },
+                            textStyle = TextStyle(
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = fontSize.sp,
+                                color = colorScheme.onSurface
+                            ),
+                            cursorBrush = SolidColor(colorScheme.primary),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                        )
+                        Text(
+                            text = if (searchMatches.isEmpty()) "0/0"
+                                   else "${findMatchIndex + 1}/${searchMatches.size}",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 4.dp)
+                        )
+                        IconButton(onClick = {
+                            if (searchMatches.isNotEmpty())
+                                findMatchIndex = (findMatchIndex - 1 + searchMatches.size) % searchMatches.size
+                        }) { Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Previous match") }
+                        IconButton(onClick = {
+                            if (searchMatches.isNotEmpty())
+                                findMatchIndex = (findMatchIndex + 1) % searchMatches.size
+                        }) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Next match") }
+                        IconButton(onClick = { showFind = false; findQuery = "" }) {
+                            Icon(Icons.Filled.Close, contentDescription = "Close search")
+                        }
+                    }
                 }
             }
         }
