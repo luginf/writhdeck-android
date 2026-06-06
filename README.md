@@ -2,20 +2,21 @@
 
 Android app for [WrithDeck](https://github.com/luginf/writhdeck) — a distraction-free text editor for writers.
 
-The WrithDeck Tcl engine runs as-is on Android via a JNI bridge, providing full parity for persistence, configuration and writing statistics with the desktop/TUI versions.
+Pure Kotlin + Jetpack Compose. No Tcl/JNI engine — all logic (config parsing, state persistence, color schemes) is implemented directly in Kotlin.
 
 ---
 
 ## Features
 
-- File browser (Documents/WrithDeck/ folder)
+- File browser (`Documents/WrithDeck/` folder)
 - Full-screen text editor with heading syntax highlighting
 - Table of contents (TOC)
 - Distraction-free mode (fullscreen)
 - Countdown timer / stopwatch
 - Daily writing statistics
-- Word frequency analysis
-- Color themes (alt01, alt02, gruvbox, nord, solarized, everforest, retro...)
+- Two independent workspaces
+- Scratchpad (persistent quick-note file)
+- Color themes: alt01, alt02, gruvbox, nord, solarized, everforest, retro, and custom schemes
 - Edit `writhdeck.ini` directly inside the app
 - Open `.txt` files from an external file manager
 - Config shared with desktop versions via `writhdeck.ini`
@@ -25,42 +26,15 @@ The WrithDeck Tcl engine runs as-is on Android via a JNI bridge, providing full 
 ## Requirements
 
 - Android Studio (Ladybug or newer)
-- NDK installed via SDK Manager (r25c+)
-- CMake 3.22+
-- Tcl 8.6.15 sources (to compile `libtcl8.6.a`)
-- [writhdeck](https://github.com/luginf/writhdeck) repository cloned **alongside** this one
-
-Expected layout:
-```
-parent/
-  writhdeck/          <- main repository (Tcl/Tk)
-  writhdeck-android/  <- this repository
-```
-
-The Gradle task `copyTclModules` reads `../writhdeck/src/` to sync `state.tcl`,
-`config.tcl` and color schemes on every build.
+- Android SDK (minSdk 26 / targetSdk 35)
+- No NDK, no native dependencies
 
 ---
 
-## Build from scratch
+## Build
 
 ```sh
 cd writhdeck-android/
-
-# 1. Download and extract Tcl sources
-wget https://prdownloads.sourceforge.net/tcl/tcl8.6.15-src.tar.gz
-tar xzf tcl8.6.15-src.tar.gz
-
-# 2. Compile libtcl8.6.a for each ABI
-./tools/build-tcl-android.sh arm64-v8a   # physical device
-./tools/build-tcl-android.sh x86_64      # emulator
-
-# 3. gradle-wrapper.jar (if missing)
-gradle wrapper --gradle-version=8.9
-# or: wget https://github.com/gradle/gradle/raw/v8.9.0/gradle/wrapper/gradle-wrapper.jar \
-#          -O gradle/wrapper/gradle-wrapper.jar
-
-# 4. Build
 ./gradlew assembleDebug
 # -> app/build/outputs/apk/debug/writhdeck-debug.apk
 ```
@@ -72,19 +46,20 @@ gradle wrapper --gradle-version=8.9
 ```
 Kotlin + Jetpack Compose UI
         |
-WrithdeckEngine.kt  (JNI wrapper)
+WrithdeckViewModel.kt  (StateFlows, business logic)
         |
-writhdeck_jni.c  (C bridge)
-        |
-libtcl8.6.a  (static Tcl 8.6, NDK)
-        |
-boot-android.tcl + state.tcl + config.tcl
+AppConfig.kt    — IniParser, ThemeColors
+StateStore.kt   — hand-rolled JSON persistence (.writhdeck.json)
+ColorSchemes.kt — 8 built-in schemes + custom schemes
 ```
 
-| Tcl side | Kotlin side |
+| Module | Role |
 |---|---|
-| `.writhdeck.json` persistence | UI, navigation, lifecycle |
-| `writhdeck.ini` config | In-memory word count |
-| Timer (state + logic) | Timer tick (coroutine `delay(1000)`) |
-| Word occurrences | TOC (`buildToc`) |
-| Daily stats | Compose rendering |
+| `AppConfig.kt` | INI parse/write, profile support, custom scheme sections |
+| `StateStore.kt` | Load/save app state, path migration, cursor restore |
+| `ColorSchemes.kt` | `SchemeColors` + 8 built-in color schemes |
+| `WrithdeckViewModel.kt` | All business logic: docs, timer, favorites, autosave, workspaces |
+| `ui/EditorScreen.kt` | `AndroidView { EditText }` — virtualized for large files |
+| `ui/BrowserScreen.kt` | File browser, keyboard shortcuts |
+| `ui/SchemeConfigScreen.kt` | Scheme selector + custom scheme editor |
+| `ui/SettingsScreen.kt` | Font, margins, autosave, timer settings |

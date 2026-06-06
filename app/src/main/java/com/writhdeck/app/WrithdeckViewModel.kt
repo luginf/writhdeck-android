@@ -28,6 +28,7 @@ import java.util.Locale
 data class DocEntry(val name: String, val path: String)
 data class StatEntry(val date: String, val words: Int)
 data class StatusBar(val left: String = "", val center: String = "", val right: String = "")
+data class TocEntry(val level: Int, val title: String, val charOffset: Int)
 
 data class WsSnapshot(
     val file: DocEntry?,
@@ -58,7 +59,9 @@ data class SettingsData(
     val chronoShow: Boolean = false,
     val statusLeft: String = "ws filename dirty",
     val statusCenter: String = "words",
-    val statusRight: String = "timer"
+    val statusRight: String = "timer",
+    val hemingwayMode: Boolean = false,
+    val lineSpacing: Float = 1.5f
 )
 
 class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
@@ -165,9 +168,20 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage = _snackbarMessage.asStateFlow()
 
+    private val _hemingwayMode = MutableStateFlow(false)
+    val hemingwayMode = _hemingwayMode.asStateFlow()
+
+    private val _lineSpacing = MutableStateFlow(1.5f)
+    val lineSpacing = _lineSpacing.asStateFlow()
+
+    private val _toc = MutableStateFlow<List<TocEntry>>(emptyList())
+    val toc = _toc.asStateFlow()
+
     private var timerJob: Job? = null
     private var autosaveJob: Job? = null
     private var wordCountJob: Job? = null
+    private var clockJob: Job? = null
+    private var tocJob: Job? = null
     private var externalUri: Uri? = null
     private var externalWritable = false
 
@@ -214,7 +228,61 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _customSchemes.value = config.customSchemes
         _activeScheme.value = config.scheme
         _themeColors.value = config.themeColors(resolveUseDark())
+        _hemingwayMode.value = config.hemingwayMode
+        _lineSpacing.value = config.lineSpacing
         restartAutosave()
+        startClockJob()
+        scheduleRebuildToc()
+    }
+
+    private fun startClockJob() {
+        clockJob?.cancel()
+        val usesClock = listOf(config.statusLeft, config.statusCenter, config.statusRight)
+            .any { it.contains("clock") }
+        if (!usesClock) { clockJob = null; return }
+        clockJob = viewModelScope.launch {
+            while (true) {
+                delay(10_000L)
+                refreshStatus()
+            }
+        }
+    }
+
+    private fun scheduleRebuildToc() {
+        tocJob?.cancel()
+        tocJob = viewModelScope.launch {
+            delay(300)
+            val text = _content.value
+            val marker = config.headingMarker
+            val md = config.markdownHeadings
+            _toc.value = withContext(Dispatchers.Default) { buildTocInternal(text, marker, md) }
+        }
+    }
+
+    private fun buildTocInternal(text: String, headingMarker: String, markdownHeadings: Boolean): List<TocEntry> {
+        val entries = mutableListOf<TocEntry>()
+        val mLen = headingMarker.length
+        val mdRe = if (markdownHeadings) Regex("^(#{1,6})\\s+(.+)$") else null
+        var offset = 0
+        for (line in text.lines()) {
+            val trimmed = line.trim()
+            var added = false
+            if (mLen > 0 && trimmed.startsWith(headingMarker) && trimmed.endsWith(headingMarker)) {
+                var level = 0; var pos = 0
+                while (pos + mLen <= trimmed.length &&
+                       trimmed.substring(pos, pos + mLen) == headingMarker) { level++; pos += mLen }
+                var end = trimmed.length
+                while (end >= mLen && trimmed.substring(end - mLen, end) == headingMarker) { end -= mLen }
+                val title = if (end > pos) trimmed.substring(pos, end).trim() else ""
+                if (level > 0 && title.isNotEmpty()) { entries.add(TocEntry(level, title, offset)); added = true }
+            }
+            if (!added && mdRe != null) {
+                val m = mdRe.find(trimmed)
+                if (m != null) entries.add(TocEntry(m.groupValues[1].length, m.groupValues[2].trim(), offset))
+            }
+            offset += line.length + 1
+        }
+        return entries
     }
 
     private fun resolveUseDark(): Boolean = when (config.androidDarkMode) {
@@ -341,6 +409,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             withContext(Dispatchers.IO) { StateStore.save(stateFile, appState) }
             refreshRecents()
             refreshStatus()
+            scheduleRebuildToc()
         }
     }
 
@@ -388,6 +457,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             _dirty.value = false
             _wordCount.value = countWords(text)
             refreshStatus()
+            scheduleRebuildToc()
         }
     }
 
@@ -405,7 +475,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _content.value = text
         _dirty.value = true
         refreshStatus()
-        // Debounce word count — countWords() on 500K+ chars is too slow for every keystroke.
+        scheduleRebuildToc()
         wordCountJob?.cancel()
         wordCountJob = viewModelScope.launch {
             delay(1000)
@@ -786,7 +856,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         chronoShow       = config.chronoShow,
         statusLeft       = config.statusLeft,
         statusCenter     = config.statusCenter,
-        statusRight      = config.statusRight
+        statusRight      = config.statusRight,
+        hemingwayMode    = config.hemingwayMode,
+        lineSpacing      = config.lineSpacing
     )
 
     fun applySettings(s: SettingsData) {
@@ -806,7 +878,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             chronoShow       = s.chronoShow,
             statusLeft       = s.statusLeft,
             statusCenter     = s.statusCenter,
-            statusRight      = s.statusRight
+            statusRight      = s.statusRight,
+            hemingwayMode    = s.hemingwayMode,
+            lineSpacing      = s.lineSpacing
         )
         applyConfig()
         val activeProfile = config.activeProfile
@@ -829,7 +903,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 "chrono_show"       to b(s.chronoShow),
                 "status_left"       to s.statusLeft,
                 "status_center"     to s.statusCenter,
-                "status_right"      to s.statusRight
+                "status_right"      to s.statusRight,
+                "hemingway_mode"    to b(s.hemingwayMode),
+                "line_spacing"      to s.lineSpacing.toString()
             )
             text = IniParser.patchProfileKey(text, activeProfile, "scheme", s.scheme)
             // Ensure all built-in scheme sections are present (add missing ones)
@@ -874,7 +950,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    // Tokens: ws filename dirty words goal timer — unknown tokens are literal text.
+    // Tokens: ws filename dirty words goal timer clock readtime pages chars — unknown tokens are literal text.
     private fun buildStatusSegment(tokens: String): String =
         tokens.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }.joinToString("") { tok ->
             when (tok) {
@@ -882,9 +958,19 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 "filename" -> _currentFile.value?.name ?: ""
                 "dirty"    -> if (_dirty.value) " *" else ""
                 "words"    -> "${_wordCount.value} w"
+                "chars"    -> "${_content.value.length} c"
                 "goal"     -> { val wc = _wordCount.value; val g = config.wordGoal
                                 if (g > 0) "$wc/$g" else "$wc w" }
                 "timer"    -> if (_timerLastTick.value != 0L || _timerActive.value) buildTimerDisplay() else ""
+                "clock"    -> SimpleDateFormat("HH:mm", Locale.US).format(Date())
+                "readtime" -> {
+                    val mins = (_wordCount.value / 200).coerceAtLeast(if (_wordCount.value > 0) 1 else 0)
+                    if (mins == 0) "" else if (mins >= 60) "${mins/60}h${(mins%60).toString().padStart(2,'0')}'" else "$mins'"
+                }
+                "pages"    -> {
+                    val p = _wordCount.value / 250
+                    if (p > 0) "${p}p" else ""
+                }
                 else       -> tok
             }
         }
@@ -918,6 +1004,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         timerJob?.cancel()
         autosaveJob?.cancel()
         wordCountJob?.cancel()
+        clockJob?.cancel()
+        tocJob?.cancel()
     }
 
     private fun checkStoragePermission(): Boolean {

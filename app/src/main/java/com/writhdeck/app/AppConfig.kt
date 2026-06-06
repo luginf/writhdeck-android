@@ -4,7 +4,8 @@ data class ThemeColors(
     val bg: String = "#1a1a1a",
     val fg: String = "#e8e8e8",
     val headingColor: String = "#c8a060",
-    val commentColor: String = "#555555"
+    val commentColor: String = "#555555",
+    val markupColor: String = ""
 )
 
 data class AppConfig(
@@ -29,15 +30,17 @@ data class AppConfig(
     val autosaveInterval: Int = 1,
     val statusLeft: String = "ws filename dirty",
     val statusCenter: String = "words",
-    val statusRight: String = "timer"
+    val statusRight: String = "timer",
+    val hemingwayMode: Boolean = false,
+    val lineSpacing: Float = 1.5f
 ) {
     fun schemeColors(): SchemeColors =
         customSchemes[scheme] ?: BUILTIN_SCHEMES[scheme] ?: BUILTIN_SCHEMES["default"]!!
 
     fun themeColors(useDark: Boolean): ThemeColors {
         val c = schemeColors()
-        return if (useDark) ThemeColors(bg = c.bg, fg = c.fg, headingColor = c.heading, commentColor = c.comment)
-               else         ThemeColors(bg = c.bgAlt, fg = c.fgAlt, headingColor = c.headingAlt, commentColor = c.commentAlt)
+        return if (useDark) ThemeColors(bg = c.bg, fg = c.fg, headingColor = c.heading, commentColor = c.comment, markupColor = c.markup)
+               else         ThemeColors(bg = c.bgAlt, fg = c.fgAlt, headingColor = c.headingAlt, commentColor = c.commentAlt, markupColor = c.markupAlt)
     }
 
     fun timerDurationSecs(): Int = timerDuration * 60
@@ -123,7 +126,9 @@ object IniParser {
             autosaveInterval = int("autosave_interval", 1).coerceAtLeast(1),
             statusLeft       = str("status_left",   "ws filename dirty"),
             statusCenter     = str("status_center", "words"),
-            statusRight      = str("status_right",  "timer")
+            statusRight      = str("status_right",  "timer"),
+            hemingwayMode    = bool("hemingway_mode", false),
+            lineSpacing      = keys["line_spacing"]?.toFloatOrNull()?.coerceIn(0.8f, 3.0f) ?: 1.5f
         )
     }
 
@@ -140,6 +145,8 @@ object IniParser {
             appendLine("cursor_restore = yes")
             appendLine("autosave_enabled = yes")
             appendLine("autosave_interval = 1")
+            appendLine("hemingway_mode = ${bool(config.hemingwayMode)}")
+            appendLine("line_spacing = ${config.lineSpacing}")
             appendLine()
             appendLine("= status_bar =")
             appendLine("status_left = ${config.statusLeft}")

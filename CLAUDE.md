@@ -35,7 +35,7 @@ Pure Kotlin + Jetpack Compose. No Tcl/JNI engine. All logic is in Kotlin:
 | `app/src/main/java/com/writhdeck/app/WrithdeckViewModel.kt` | ViewModel: StateFlows, timer, docs, favorites, config, autosave, workspaces |
 | `app/src/main/java/com/writhdeck/app/MainActivity.kt` | Entry point, system dark mode, storage permission |
 | `app/src/main/java/com/writhdeck/app/ui/BrowserScreen.kt` | File browser: scratchpad item, keyboard shortcuts |
-| `app/src/main/java/com/writhdeck/app/ui/EditorScreen.kt` | Editor: BasicTextField, TOC, command mode, workspace toggle |
+| `app/src/main/java/com/writhdeck/app/ui/EditorScreen.kt` | Editor: AndroidView(EditText), syntax spans, TOC, command mode, workspace toggle |
 | `app/src/main/java/com/writhdeck/app/ui/SchemeConfigScreen.kt` | Color scheme selector + custom scheme editor |
 | `app/src/main/java/com/writhdeck/app/ui/SettingsScreen.kt` | Settings: font, margins, autosave, timer |
 | `app/build.gradle.kts` | Gradle config (no NDK, no Tcl dependencies) |
@@ -79,11 +79,31 @@ Applied in `load()` to cursors keys, favorites list, recent list, and daily map 
 
 `openFile()` sets `_initialCursorOffset` **before** `_currentFile` so that `remember(currentFile?.path, wsActive)` in EditorScreen reads the correct value during composition. `saveCursor(offset)` converts char offset → (cy, cx) via `textOffsetToLinecol` and persists to `StateStore`.
 
-`EditorScreen` uses `remember(currentFile?.path, wsActive)` (not just path) so `tfv` resets on both file change **and** workspace switch.
+### AndroidView EditText (editor)
 
-### BasicTextField and cursor
+The editor uses `AndroidView { android.widget.EditText }` — not `BasicTextField`. This uses Android's `DynamicLayout` which only renders visible lines, making it handle large files (500K+ chars) efficiently.
 
-Use `remember { }` **without a content key**. `remember(content) { }` resets the cursor to position 0 on every keystroke. `LaunchedEffect(content)` handles sync on external file open.
+**Key state refs** (captured by factory closure, updated by `update {}` block):
+- `ignoreTextChange: booleanArrayOf(false)` — prevents TextWatcher feedback loop when `setText()` is called programmatically
+- `keyHandlerRef: Array<(Int, AKeyEvent) -> Boolean>` — updated each recomposition to close over current compose state; factory calls `keyHandlerRef[0](keyCode, event)`
+- `originalKeyListener: Array<KeyListener?>` — stored after `inputType` is set; restored/nulled in `update {}` for read-only toggle
+- `editorRef: MutableState<EditText?>` — set in `factory { }.also { editorRef.value = it }`
+
+**File/workspace change detection** — `editText.tag = "${currentFile?.path}:${wsActive}"`. In `update {}`, if tag differs → `ignoreTextChange[0] = true; setText(content); setSelection(liveCursor); tag = key; ignoreTextChange[0] = false`. This is the ONLY place `setText()` is called; all other recompositions skip it.
+
+**TextWatcher** — `afterTextChanged` calls `vm.updateLiveCursor(selectionStart)` + `vm.updateContent(text)`. Guards with `if (ignoreTextChange[0]) return`.
+
+**Syntax highlighting** — `LaunchedEffect(content, headingMarker, ..., hdColorInt, cmtColorInt)` with `delay(300)` debounce + `withContext(Dispatchers.Default)`. Applies via marker span subclasses (`SyntaxHeadingSpan`, `SyntaxCommentSpan`) on the Editable. `setSpan()` does NOT trigger TextWatcher — no guard needed.
+
+**Search spans** — `LaunchedEffect(searchMatches, findMatchIndex)` runs on main dispatcher, directly calls `editable.setSpan(SearchBgSpan/SearchCurrentBgSpan/SearchCurrentFgSpan, ...)`. Then `editText.setSelection(match)` to scroll.
+
+**Undo/redo** — native Android EditText handles Ctrl+Z automatically (API 23+, minSdk=26). No `ArrayDeque` needed.
+
+**Heading toggle** — `applyHeadingResult(text, selStart, selEnd, marker): Triple<String, Int, Int>?` returns new text + selection. Apply: `ignoreTextChange[0] = true; editText.setText(newText); editText.setSelection(...); ignoreTextChange[0] = false; vm.updateContent(newText)`.
+
+**TOC navigation** — `editorRef.value?.setSelection(entry.charOffset)`.
+
+**Cursor save** — `doBack()` and `DisposableEffect.onDispose` read `editorRef.value?.selectionStart` directly.
 
 ### IME / keyboard in BrowserScreen
 
@@ -169,7 +189,8 @@ Via `contentResolver.openOutputStream()` if `canWrite`. URI stored in `externalU
 - `collectAsStateWithLifecycle()` for all ViewModel StateFlows
 - `remember(key) { ... }` for expensive derived values (`parseHexColor`, `buildToc`)
 - `BackHandler` to intercept the system back gesture
-- `imePadding()` on the editor to prevent soft keyboard from covering text
+- `AndroidView { factory / update }` for native views inside Compose — `factory` runs once, `update` runs on every recomposition
+- Mutable ref arrays (`arrayOf<() -> Unit>({ })`) to pass current compose lambdas into `factory` closures
 
 ---
 
@@ -178,6 +199,8 @@ Via `contentResolver.openOutputStream()` if `canWrite`. URI stored in `externalU
 ## What not to do
 
 - Do not add Tcl/JNI — the engine is gone, all logic is pure Kotlin.
-- Do not use `remember(content) { }` in `BasicTextField` — resets cursor on every keystroke.
+- Do not replace `AndroidView { EditText }` with `BasicTextField` — BasicTextField is not virtualized and becomes unusable on large files.
+- Do not call `editText.setText()` from the TextWatcher (feedback loop) — use `ignoreTextChange[0]` guard.
+- Do not update `keyHandlerRef[0]` inside the `factory` block — update it in `update {}` to capture current compose state.
 - Do not call `focusRequester.requestFocus()` automatically on BrowserScreen open — use the `imeAllowed` pattern.
 - Never commit on behalf of the user — let the user decide when and how to commit.

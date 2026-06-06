@@ -65,6 +65,8 @@ fun SettingsScreen(
             IntSettingRow("Margin height", s.marginHeight, 0, 200) { s = s.copy(marginHeight = it) }
             IntSettingRow("Word goal", s.wordGoal, 0, 99999) { s = s.copy(wordGoal = it) }
             StringSettingRow("Heading marker", s.headingMarker) { s = s.copy(headingMarker = it) }
+            FloatSettingRow("Line spacing", s.lineSpacing, 0.8f, 3.0f, 0.1f) { s = s.copy(lineSpacing = it) }
+            SwitchSettingRow("Hemingway mode", s.hemingwayMode) { s = s.copy(hemingwayMode = it) }
 
             SettingsSection("Autosave")
             SwitchSettingRow("Enabled", s.autosaveEnabled) { s = s.copy(autosaveEnabled = it) }
@@ -217,6 +219,42 @@ private fun StringSettingRow(
                 fontFamily = FontFamily.Monospace
             )
         )
+    }
+}
+
+@Composable
+private fun FloatSettingRow(
+    label: String,
+    value: Float,
+    min: Float,
+    max: Float,
+    step: Float,
+    onChange: (Float) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+        IconButton(
+            onClick = { val v = (value - step).coerceAtLeast(min); onChange((v * 10).toInt() / 10f) },
+            enabled = value > min,
+            modifier = Modifier.size(36.dp)
+        ) { Text("-", style = MaterialTheme.typography.titleMedium) }
+        Text(
+            text = "${"%.1f".format(value)}×",
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.width(52.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
+        IconButton(
+            onClick = { val v = (value + step).coerceAtMost(max); onChange((v * 10).toInt() / 10f) },
+            enabled = value < max,
+            modifier = Modifier.size(36.dp)
+        ) { Text("+", style = MaterialTheme.typography.titleMedium) }
     }
 }
 
