@@ -23,6 +23,14 @@ Pure Kotlin + Jetpack Compose. No Tcl/JNI engine. All logic is in Kotlin:
 # -> app/build/outputs/apk/debug/writhdeck-debug.apk
 ```
 
+### Auto-incrementing version (`app/build.gradle.kts`)
+
+`versionCode`/`versionName` are computed at configuration time as `"YYYY-MM-DDx"` (e.g. `2026-06-07a`, then `2026-06-07b`, …) — `x` is a spreadsheet-column-style letter suffix (`a`…`z`, `aa`, `ab`, …) that increments per build on the same day. State is persisted in `app/version.properties` (`date=`/`letter=`, auto-generated, gitignore-able, do not edit by hand). `versionCode` is the numeric encoding `YYYYMMDD * 100 + (letterIndex + 1)` (e.g. `2026060701`).
+
+The letter only advances when the requested Gradle tasks contain `assemble`/`bundle`/`install` (checked via `gradle.startParameter.taskNames`) — IDE syncs, `lint`, `test`, etc. don't burn through the alphabet.
+
+**Why:** a static `versionCode = 1` made Android's package manager sometimes treat a reinstall as a no-op (binary not actually replaced — "it says updated but nothing changed", requiring an uninstall first to see changes). A unique, monotonically increasing `versionCode` per build forces a real replace. **How to apply:** if you ever see a stale APK behavior again, also try `./gradlew clean assembleDebug` — Gradle's incremental up-to-date check can occasionally report `compileDebugKotlin UP-TO-DATE` right after a source edit (observed 2026-06-07; `--rerun-tasks`/`clean` forces a true recompile).
+
 ---
 
 ## Key files
@@ -35,9 +43,9 @@ Pure Kotlin + Jetpack Compose. No Tcl/JNI engine. All logic is in Kotlin:
 | `app/src/main/java/com/writhdeck/app/WrithdeckViewModel.kt` | ViewModel: StateFlows, timer, docs, favorites, config, autosave, workspaces |
 | `app/src/main/java/com/writhdeck/app/MainActivity.kt` | Entry point, system dark mode, storage permission |
 | `app/src/main/java/com/writhdeck/app/ui/BrowserScreen.kt` | File browser: scratchpad item, keyboard shortcuts |
-| `app/src/main/java/com/writhdeck/app/ui/EditorScreen.kt` | Editor: AndroidView(EditText), syntax spans, TOC, command mode, workspace toggle |
+| `app/src/main/java/com/writhdeck/app/ui/EditorScreen.kt` | Editor: AndroidView(FlingEditText), syntax spans, TOC, command mode, workspace toggle |
 | `app/src/main/java/com/writhdeck/app/ui/SchemeConfigScreen.kt` | Color scheme selector + custom scheme editor |
-| `app/src/main/java/com/writhdeck/app/ui/SettingsScreen.kt` | Settings: font, margins, autosave, timer |
+| `app/src/main/java/com/writhdeck/app/ui/SettingsScreen.kt` | Settings: tabbed (Profile/Display/Fonts/Schemes/Timer/Misc) |
 | `app/build.gradle.kts` | Gradle config (no NDK, no Tcl dependencies) |
 
 ---
@@ -81,7 +89,9 @@ Applied in `load()` to cursors keys, favorites list, recent list, and daily map 
 
 ### AndroidView EditText (editor)
 
-The editor uses `AndroidView { android.widget.EditText }` — not `BasicTextField`. This uses Android's `DynamicLayout` which only renders visible lines, making it handle large files (500K+ chars) efficiently.
+The editor uses `AndroidView { FlingEditText }` (a private `EditText` subclass — not `BasicTextField`). This uses Android's `DynamicLayout` which only renders visible lines, making it handle large files (500K+ chars) efficiently.
+
+**`FlingEditText`** — adds momentum/fling scrolling. A plain multi-line `EditText` scrolls 1:1 with the drag and stops dead on release (no inertia), unlike `ScrollView`/most text editors and browsers. Wrapping in `ScrollView` would add fling but forces full-content-height measurement, defeating `DynamicLayout`'s visible-lines-only rendering on large files — so fling is implemented by driving the `EditText`'s own `scrollY` with an `OverScroller` + `GestureDetector.onFling`, exactly like `ScrollView` does internally (`onTouchEvent` aborts any running scroll on `ACTION_DOWN`, detects fling, `computeScroll()` advances the animation via `postInvalidateOnAnimation`). Guards `hasSelection()` so flicking after a text-selection drag doesn't trigger a spurious scroll.
 
 **Key state refs** (captured by factory closure, updated by `update {}` block):
 - `ignoreTextChange: booleanArrayOf(false)` — prevents TextWatcher feedback loop when `setText()` is called programmatically
@@ -93,7 +103,9 @@ The editor uses `AndroidView { android.widget.EditText }` — not `BasicTextFiel
 
 **TextWatcher** — `afterTextChanged` calls `vm.updateLiveCursor(selectionStart)` + `vm.updateContent(text)`. Guards with `if (ignoreTextChange[0]) return`.
 
-**Syntax highlighting** — `LaunchedEffect(content, headingMarker, ..., hdColorInt, cmtColorInt)` with `delay(300)` debounce + `withContext(Dispatchers.Default)`. Applies via marker span subclasses (`SyntaxHeadingSpan`, `SyntaxCommentSpan`) on the Editable. `setSpan()` does NOT trigger TextWatcher — no guard needed.
+**Syntax highlighting** — `LaunchedEffect(content, headingMarker, markdownHeadings, commentMarker, boldMarker, italicMarker, underlineMarker, strikethroughMarker, hdColorInt, cmtColorInt, markupColorInt)` with `delay(300)` debounce + `withContext(Dispatchers.Default)`. Applies via marker span subclasses (`SyntaxHeadingSpan`, `SyntaxCommentSpan`, `SyntaxMarkupSpan`) on the Editable. `setSpan()` does NOT trigger TextWatcher — no guard needed.
+
+`computeSyntaxSpans` takes all 5 inline/comment markers as configurable `String` params (mirrors Tcl/web, see "Configurable markup markers" below) — comment detection is `commentMarker.isNotEmpty() && text.startsWith(commentMarker, ts)` (anchored after leading spaces via `ts`), and inline markup is one combined `Regex` built by alternating `Regex.escape(marker) + ".+?" + Regex.escape(marker)` for each non-empty marker among bold/italic/underline/strikethrough — all four map to the single `markupColorInt`/`SyntaxMarkupSpan` (Android only has one `markupColor` per scheme, like the web version's single `hl-markup` CSS class; Tcl's 4-separate-colors model was NOT replicated).
 
 **Search spans** — `LaunchedEffect(searchMatches, findMatchIndex)` runs on main dispatcher, directly calls `editable.setSpan(SearchBgSpan/SearchCurrentBgSpan/SearchCurrentFgSpan, ...)`. Then `editText.setSelection(match)` to scroll.
 
@@ -152,6 +164,12 @@ EditorScreen behavior when `!fileWritable`:
 - AlertDialog on file open
 - "Discard changes?" confirmation on back navigation when dirty
 
+### Closing a modified document — `requestClose()`
+
+`requestClose()` (in `EditorScreen`, next to `doBack()`) is the single entry point for "leave this document": `dirty && !fileWritable` → `showDiscardConfirm` ("Discard changes?" — changes can't be saved); `dirty && fileWritable` → `showSaveConfirm` ("Save changes?" with **Save** / **Don't save** / **Cancel** — a 3-way `AlertDialog` using a `Row` of two `TextButton`s in the `dismissButton` slot, since `AlertDialog` only exposes two button slots); otherwise → `doBack()` directly. Wired from the `TopAppBar` back `IconButton`, the system back gesture (`BackHandler { showSaveConfirm = true }` when `dirty && fileWritable && !distractionFree`), and `Ctrl+Q`.
+
+**Why:** previously a dirty+writable document auto-saved silently on exit with no way to discard changes — the user asked for a confirmation with the option not to save ("il faudrait une confirmation pour être sûr (et la possibilité de ne pas le faire)").
+
 **Never use `storagePermissionGranted` to bypass `File.canWrite()`** — that permission doesn't grant access to other apps' private directories (e.g. Termux `/data/data/com.termux/files/`). Files from those paths must be written via `contentResolver.openOutputStream(uri)` when the intent grants `FLAG_GRANT_WRITE_URI_PERMISSION`.
 
 ### Margins
@@ -176,7 +194,33 @@ No upper limit enforced by the parser — `IniParser.parse()` uses `coerceAtLeas
 
 ### Settings screen
 
-`SettingsData` data class mirrors the user-configurable fields of `AppConfig`. `getSettingsData()` reads current config; `applySettings(s)` calls `config.copy(...)`, `applyConfig()`, then `IniParser.patchKeys` to persist all fields. `SettingsScreen` groups controls: Writing, Autosave, Timer, plus "Edit INI directly" button.
+`SettingsData` data class mirrors the user-configurable fields of `AppConfig`. `getSettingsData()` reads current config; `applySettings(s)` calls `config.copy(...)`, `applyConfig()`, then `IniParser.patchKeys` to persist all fields.
+
+`SettingsScreen` is tabbed via `ScrollableTabRow`/`Tab`, mirroring the desktop Tcl/Tk config dialog's tab set and order (`SETTINGS_TABS`): **Profile** (margins, word goal, line spacing), **Display** (heading marker, status bar zones), **Fonts** (font size, font family, bold, live preview), **Schemes** (scheme dropdown + "Edit scheme colors" → `SchemeConfigScreen`), **Timer** (type, duration, sound, alert, status bar display), **Misc** (Hemingway mode, autosave, "Edit INI directly"). Each tab is a private `@Composable` taking `(s: SettingsData, onChange: (SettingsData) -> Unit)`. `selectedTab` is local `mutableIntStateOf` — not persisted.
+
+### Editor font family
+
+Android has no portable font-enumeration API (unlike Tk's `font families`), so the Fonts tab offers a fixed list of **8 built-in generic font-family aliases** (`EDITOR_FONTS` in `AppConfig.kt`) — a mix of monospace, serif and sans-serif faces (`monospace`, `serif-monospace`, `sans-serif`, `sans-serif-condensed`, `sans-serif-light`, `sans-serif-medium`, `serif`, `casual`). These resolve via `Typeface.create(familyName, Typeface.NORMAL)` against the system `fonts.xml` — **no font files are embedded** (avoids APK bloat and font-licensing concerns; guaranteed present on AOSP).
+
+Persisted as `font_family` (+ `font_bold` boolean) in the INI (parsed/validated against `EDITOR_FONTS` in `IniParser.parse()`, patched via `IniParser.patchKeys`). Exposed as `WrithdeckViewModel.fontFamily: StateFlow<String>` / `fontBold: StateFlow<Boolean>`. `EditorScreen` applies `Typeface.create(family, if (bold) BOLD else NORMAL)` to the `EditText` — set once in the `factory` block and re-applied in `update {}` only when family or weight changes (guarded by `EditorStyle.fontFamily`/`fontBold` inside the existing `lastStyle[0]` comparison, avoiding layout jank on unrelated recompositions).
+
+**Live preview** — `FontPreview` in `SettingsScreen.kt` renders a sample sentence with the currently selected family/size/weight (`FontFamily(Typeface.create(...))`), so the user sees the effect of each setting immediately, without leaving the Fonts tab.
+
+### Block cursor
+
+The Display tab's "Editor" section has a "Block cursor" `SwitchSettingRow` (`blockCursor` in `AppConfig`/`SettingsData`/`WrithdeckViewModel`, persisted as `block_cursor` — mirrors Tcl/Tk's `block_cursor_gui` and the web version's `blockCursor`, both using the editor foreground colour as cursor colour, e.g. Tk's `-insertbackground $fg`).
+
+Android has no native block-cursor toggle (unlike Tk's `-blockcursor`). Emulated via `EditText.setTextCursorDrawable()` (**API 29+ only** — `Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q`; older devices silently keep the default thin caret) with a `GradientDrawable` rectangle sized to one character's width (`paint.measureText("M")`) × `lineHeight`, filled with `editorFgInt`. Applied/cleared inside the existing `lastStyle[0]`-guarded style block in `EditorScreen`'s `update {}` (extends `EditorStyle` with `blockCursor: Boolean`) — recomputed only when style actually changes, so character-width measurement (which depends on the current typeface/size, set just above in the same block) stays in sync.
+
+### In-document Settings access
+
+`EditorScreen`'s "≡" `DropdownMenu` (the in-document overflow menu) ends with an "App" section: a single "Settings" `DropdownMenuItem` at the very bottom (after a `HorizontalDivider`, below "Reset timer"), calling `onNavigateSettings()` — a new optional param threaded from `AppNavigation.kt` (`nav.navigate("settings")`). Mirrors writhdeck-web, which exposes Settings from its "?" help menu rather than only from the file browser. Lets the user reach Settings without leaving an open document.
+
+### Configurable markup markers
+
+Mirrors the Tcl/Tk and web versions: the Display tab's "Markup" section exposes `commentMarker`/`boldMarker`/`italicMarker`/`underlineMarker`/`strikethroughMarker` (all `String`, default `%`/`**`/`//`/`__`/`--`) plus a "Markdown headings (#)" `SwitchSettingRow` toggle for `markdownHeadings`. Persisted via `IniParser.parse()`'s `marker(k, def)` helper and `IniParser.patchKeys`, exposed as `WrithdeckViewModel` StateFlows, and consumed by `computeSyntaxSpans` in `EditorScreen.kt` (see "Syntax highlighting" above).
+
+`marker(k, def)` replicates the desktop INI convention where a literal `"0"` value means "marker disabled" (round-trips an empty string through hand-edited INI files): `keys[k]?.let { if (it == "0") "" else it } ?: def`.
 
 ### External file save
 

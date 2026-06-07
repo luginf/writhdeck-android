@@ -1,5 +1,21 @@
 package com.writhdeck.app
 
+/** Editor font choice: a display label paired with an Android generic font-family alias.
+ *  These aliases are resolved by `Typeface.create(familyName, style)` against the system's
+ *  `fonts.xml` — no font files need to be embedded in the APK. */
+data class EditorFont(val label: String, val familyName: String)
+
+val EDITOR_FONTS = listOf(
+    EditorFont("Monospace", "monospace"),
+    EditorFont("Monospace (serif)", "serif-monospace"),
+    EditorFont("Sans serif", "sans-serif"),
+    EditorFont("Sans serif condensed", "sans-serif-condensed"),
+    EditorFont("Sans serif light", "sans-serif-light"),
+    EditorFont("Sans serif medium", "sans-serif-medium"),
+    EditorFont("Serif", "serif"),
+    EditorFont("Casual", "casual")
+)
+
 data class ThemeColors(
     val bg: String = "#1a1a1a",
     val fg: String = "#e8e8e8",
@@ -15,6 +31,11 @@ data class AppConfig(
     val marginHeight: Int = 16,
     val headingMarker: String = "=",
     val markdownHeadings: Boolean = true,
+    val commentMarker: String = "%",
+    val boldMarker: String = "**",
+    val italicMarker: String = "//",
+    val underlineMarker: String = "__",
+    val strikethroughMarker: String = "--",
     val timerType: String = "countdown",
     val timerDuration: Int = 25,
     val timerSound: Boolean = false,
@@ -26,6 +47,9 @@ data class AppConfig(
     val activeProfile: String = "default",
     val customSchemes: Map<String, SchemeColors> = emptyMap(),
     val fontSize: Int = 16,
+    val fontFamily: String = "monospace",
+    val fontBold: Boolean = false,
+    val blockCursor: Boolean = false,
     val autosaveEnabled: Boolean = true,
     val autosaveInterval: Int = 1,
     val statusLeft: String = "ws filename dirty",
@@ -93,6 +117,8 @@ object IniParser {
             return v == "yes" || v == "1" || v == "true" || v == "on"
         }
         fun int(k: String, def: Int): Int = keys[k]?.toIntOrNull() ?: def
+        // "0" is the desktop convention for "marker disabled" (round-trips an empty value through hand-edited INI files)
+        fun marker(k: String, def: String): String = keys[k]?.let { if (it == "0") "" else it } ?: def
         fun str(k: String, def: String): String = keys[k]?.takeIf { it.isNotBlank() } ?: def
 
         val customSchemes: Map<String, SchemeColors> = schemes.mapValues { (name, map) ->
@@ -109,6 +135,11 @@ object IniParser {
             marginHeight     = int("margin_height", 16).coerceAtLeast(0),
             headingMarker    = str("heading_marker", "="),
             markdownHeadings = bool("markdown_headings", true),
+            commentMarker    = marker("comment_marker", "%"),
+            boldMarker       = marker("bold_marker", "**"),
+            italicMarker     = marker("italic_marker", "//"),
+            underlineMarker  = marker("underline_marker", "__"),
+            strikethroughMarker = marker("strikethrough_marker", "--"),
             timerType        = str("timer_type", "countdown").let {
                 if (it == "stopwatch") "stopwatch" else "countdown"
             },
@@ -122,6 +153,11 @@ object IniParser {
             activeProfile    = activeProfile,
             customSchemes    = customSchemes,
             fontSize         = int("font_size", 16).coerceIn(10, 32),
+            fontFamily       = str("font_family", "monospace").let {
+                if (it in EDITOR_FONTS.map { f -> f.familyName }) it else "monospace"
+            },
+            fontBold         = bool("font_bold", false),
+            blockCursor      = bool("block_cursor", false),
             autosaveEnabled  = bool("autosave_enabled", true),
             autosaveInterval = int("autosave_interval", 1).coerceAtLeast(1),
             statusLeft       = str("status_left",   "ws filename dirty"),

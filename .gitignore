@@ -9,6 +9,7 @@ local.properties
 captures/
 app/.cxx/
 app/src/main/assets/
+app/version.properties
 tcl-android/
 tcl8.6.15/
 tcl8.6.15-src.tar.gz

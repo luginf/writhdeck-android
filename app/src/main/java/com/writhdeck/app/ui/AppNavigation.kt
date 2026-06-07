@@ -44,10 +44,16 @@ fun AppNavigation(vm: WrithdeckViewModel = viewModel(), onRequestPermission: () 
             )
         }
         composable("editor") {
-            EditorScreen(vm = vm, onBack = {
-                vm.clearExternalFile()
-                nav.popBackStack()
-            })
+            EditorScreen(
+                vm = vm,
+                onBack = {
+                    vm.clearExternalFile()
+                    nav.popBackStack()
+                },
+                onNavigateSettings = {
+                    nav.navigate("settings") { launchSingleTop = true }
+                }
+            )
         }
         composable("schemes") {
             SchemeConfigScreen(vm = vm, onBack = { nav.popBackStack() })

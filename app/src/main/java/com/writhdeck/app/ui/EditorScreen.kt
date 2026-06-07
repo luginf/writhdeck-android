@@ -1,17 +1,24 @@
 package com.writhdeck.app.ui
 
 import android.app.Activity
+import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.text.Editable
 import android.text.Spannable
 import android.text.TextWatcher
 import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
 import android.util.TypedValue
+import android.view.GestureDetector
 import android.view.Gravity
 import android.view.KeyEvent as AKeyEvent
+import android.view.MotionEvent
 import android.view.inputmethod.EditorInfo
+import android.widget.EditText
+import android.widget.OverScroller
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -72,6 +79,48 @@ private class SearchBgSpan(color: Int) : BackgroundColorSpan(color)
 private class SearchCurrentBgSpan(color: Int) : BackgroundColorSpan(color)
 private class SearchCurrentFgSpan(color: Int) : ForegroundColorSpan(color)
 
+/** EditText with fling-based momentum scrolling.
+ *
+ *  A plain multi-line EditText scrolls 1:1 with the drag gesture and stops dead on
+ *  release — no inertia, unlike ScrollView/RecyclerView/most text editors and browsers.
+ *  Wrapping it in a ScrollView would fix that, but forces full-content-height
+ *  measurement, which defeats DynamicLayout's visible-lines-only rendering and makes
+ *  large files (500K+ chars) slow again — so fling is implemented here instead by
+ *  driving the EditText's own `scrollY` with an OverScroller, exactly like ScrollView
+ *  does internally. */
+private class FlingEditText(context: Context) : EditText(context) {
+    private val scroller = OverScroller(context)
+    private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+        override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
+            if (hasSelection()) return false
+            val layout = layout ?: return false
+            val visibleHeight = height - totalPaddingTop - totalPaddingBottom
+            val maxScrollY = (layout.height - visibleHeight).coerceAtLeast(0)
+            if (maxScrollY <= 0) return false
+            scroller.fling(scrollX, scrollY, 0, -velocityY.toInt(), 0, 0, 0, maxScrollY)
+            postInvalidateOnAnimation()
+            return true
+        }
+    })
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN && !scroller.isFinished) {
+            scroller.abortAnimation()
+        }
+        gestureDetector.onTouchEvent(event)
+        return super.onTouchEvent(event)
+    }
+
+    override fun computeScroll() {
+        if (scroller.computeScrollOffset()) {
+            scrollTo(scrollX, scroller.currY)
+            postInvalidateOnAnimation()
+        } else {
+            super.computeScroll()
+        }
+    }
+}
+
 fun parseHexColorInt(hex: String): Int {
     val h = hex.trimStart('#')
     if (h.length != 6) return 0
@@ -99,24 +148,27 @@ data class SyntaxSpanData(val start: Int, val end: Int, val isHeading: Boolean, 
 
 fun computeSyntaxSpans(
     text: String, headingMarker: String, markdownHeadings: Boolean,
+    commentMarker: String, boldMarker: String, italicMarker: String,
+    underlineMarker: String, strikethroughMarker: String,
     hdColorInt: Int, cmtColorInt: Int, markupColorInt: Int = 0
 ): List<SyntaxSpanData> {
     if (hdColorInt == 0 && cmtColorInt == 0 && markupColorInt == 0) return emptyList()
     val spans = mutableListOf<SyntaxSpanData>()
     val mLen = headingMarker.length
     val mdRe = if (markdownHeadings) Regex("^#{1,6}\\s") else null
-    val markupRe = if (markupColorInt != 0)
-        Regex("""\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|~~[^~\n]+~~""") else null
+    val markupRe = if (markupColorInt != 0) {
+        val parts = listOf(boldMarker, italicMarker, underlineMarker, strikethroughMarker)
+            .filter { it.isNotEmpty() }
+            .map { "${Regex.escape(it)}.+?${Regex.escape(it)}" }
+        if (parts.isEmpty()) null else Regex(parts.joinToString("|"))
+    } else null
     var lineStart = 0
     while (lineStart <= text.length) {
         val lineEnd = text.indexOf('\n', lineStart).let { if (it < 0) text.length else it }
         var ts = lineStart; while (ts < lineEnd && text[ts] == ' ') ts++
         val end = lineEnd.coerceAtMost(text.length)
         if (end > lineStart) {
-            val isComment = ts < lineEnd && (
-                text[ts] == '%' || text[ts] == '>' ||
-                (text[ts] == '/' && ts + 1 < lineEnd && text[ts + 1] == '/')
-            )
+            val isComment = commentMarker.isNotEmpty() && ts < lineEnd && text.startsWith(commentMarker, ts)
             val isHeading = !isComment && mLen > 0 && lineEnd - lineStart > mLen &&
                 text.startsWith(headingMarker, ts) && run {
                     var te = lineEnd - 1
@@ -222,22 +274,31 @@ fun computeSectionAnalysis(toc: List<TocEntry>, content: String): List<SectionAn
 
 private data class EditorStyle(
     val fgColor: Int, val fontSizeSp: Float, val lineSpacingMult: Float,
-    val padX: Int, val padY: Int, val writable: Boolean, val hemingway: Boolean
+    val padX: Int, val padY: Int, val writable: Boolean, val hemingway: Boolean,
+    val fontFamily: String, val fontBold: Boolean, val blockCursor: Boolean
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
+fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings: () -> Unit = {}) {
     val content by vm.content.collectAsStateWithLifecycle()
     val wordCount by vm.wordCount.collectAsStateWithLifecycle()
     val currentFile by vm.currentFile.collectAsStateWithLifecycle()
     val dirty by vm.dirty.collectAsStateWithLifecycle()
     val headingMarker by vm.headingMarker.collectAsStateWithLifecycle()
     val markdownHeadings by vm.markdownHeadings.collectAsStateWithLifecycle()
+    val commentMarker by vm.commentMarker.collectAsStateWithLifecycle()
+    val boldMarker by vm.boldMarker.collectAsStateWithLifecycle()
+    val italicMarker by vm.italicMarker.collectAsStateWithLifecycle()
+    val underlineMarker by vm.underlineMarker.collectAsStateWithLifecycle()
+    val strikethroughMarker by vm.strikethroughMarker.collectAsStateWithLifecycle()
     val keyToc by vm.keyToc.collectAsStateWithLifecycle()
     val marginWidth by vm.marginWidth.collectAsStateWithLifecycle()
     val marginHeight by vm.marginHeight.collectAsStateWithLifecycle()
     val fontSize by vm.fontSize.collectAsStateWithLifecycle()
+    val fontFamily by vm.fontFamily.collectAsStateWithLifecycle()
+    val fontBold by vm.fontBold.collectAsStateWithLifecycle()
+    val blockCursor by vm.blockCursor.collectAsStateWithLifecycle()
     val lineSpacing by vm.lineSpacing.collectAsStateWithLifecycle()
     val hemingwayMode by vm.hemingwayMode.collectAsStateWithLifecycle()
     val toc by vm.toc.collectAsStateWithLifecycle()
@@ -296,7 +357,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     val keyHandlerRef   = remember { arrayOf<(Int, AKeyEvent) -> Boolean>({ _, _ -> false }) }
     @Suppress("UNCHECKED_CAST")
     val originalKeyListener = remember { arrayOfNulls<android.text.method.KeyListener>(1) }
-    val lastStyle = remember { arrayOf(EditorStyle(0, 0f, 0f, -1, -1, true, false)) }
+    val lastStyle = remember { arrayOf(EditorStyle(0, 0f, 0f, -1, -1, true, false, "", false, false)) }
     val hemingwayFilter = remember {
         android.text.InputFilter { _, start, end, dest, dstart, dend ->
             if (dend - dstart > end - start) dest.subSequence(dstart, dend) else null
@@ -306,6 +367,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     var distractionFree by rememberSaveable { mutableStateOf(false) }
     var showReadOnlyAlert by remember { mutableStateOf(false) }
     var showDiscardConfirm by remember { mutableStateOf(false) }
+    var showSaveConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(currentFile?.path) {
         if (!fileWritable && currentFile != null) showReadOnlyAlert = true
@@ -316,10 +378,19 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
         onBack()
     }
 
+    fun requestClose() {
+        when {
+            dirty && !fileWritable -> showDiscardConfirm = true
+            dirty -> showSaveConfirm = true
+            else -> doBack()
+        }
+    }
+
     DisposableEffect(Unit) { onDispose { vm.saveCursor(editorRef.value?.selectionStart ?: 0) } }
 
     if (distractionFree) BackHandler { distractionFree = false }
     if (dirty && !fileWritable && !distractionFree) BackHandler { showDiscardConfirm = true }
+    if (dirty && fileWritable && !distractionFree) BackHandler { showSaveConfirm = true }
 
     val context = LocalContext.current
     DisposableEffect(distractionFree) {
@@ -374,12 +445,20 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
     }
 
     // Syntax highlighting — computed async with 300ms debounce to avoid blocking on large files.
-    LaunchedEffect(content, headingMarker, markdownHeadings, hdColorInt, cmtColorInt, markupColorInt) {
+    LaunchedEffect(
+        content, headingMarker, markdownHeadings,
+        commentMarker, boldMarker, italicMarker, underlineMarker, strikethroughMarker,
+        hdColorInt, cmtColorInt, markupColorInt
+    ) {
         val snap = content
         delay(300)
         if (content != snap) return@LaunchedEffect
         val spans = withContext(Dispatchers.Default) {
-            computeSyntaxSpans(snap, headingMarker, markdownHeadings, hdColorInt, cmtColorInt, markupColorInt)
+            computeSyntaxSpans(
+                snap, headingMarker, markdownHeadings,
+                commentMarker, boldMarker, italicMarker, underlineMarker, strikethroughMarker,
+                hdColorInt, cmtColorInt, markupColorInt
+            )
         }
         editorRef.value?.editableText?.let { applySyntaxSpansToEditable(it, spans) }
     }
@@ -421,13 +500,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
             if (!distractionFree) TopAppBar(
                 title = { Text(titleText, fontFamily = FontFamily.Monospace, maxLines = 1) },
                 navigationIcon = {
-                    IconButton(onClick = {
-                        when {
-                            dirty && !fileWritable -> showDiscardConfirm = true
-                            dirty -> { vm.saveFile(); doBack() }
-                            else  -> doBack()
-                        }
-                    }) {
+                    IconButton(onClick = { requestClose() }) {
                         @Suppress("DEPRECATION")
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                     }
@@ -550,6 +623,12 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                                     onClick = { showMenu = false; vm.timerReset() }
                                 )
                             }
+                            HorizontalDivider()
+                            // — App —
+                            DropdownMenuItem(
+                                text = { Text("Settings", fontFamily = FontFamily.Monospace) },
+                                onClick = { showMenu = false; onNavigateSettings() }
+                            )
                         }
                     }
                 }
@@ -581,12 +660,12 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
 
             AndroidView(
                 factory = { ctx ->
-                    android.widget.EditText(ctx).apply {
+                    FlingEditText(ctx).apply {
                         inputType = android.text.InputType.TYPE_CLASS_TEXT or
                             android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
                             android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
                         imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN
-                        typeface = Typeface.MONOSPACE
+                        typeface = Typeface.create(fontFamily, if (fontBold) Typeface.BOLD else Typeface.NORMAL)
                         gravity = Gravity.TOP or Gravity.START
                         setBackgroundColor(android.graphics.Color.TRANSPARENT)
                         isSingleLine = false
@@ -620,15 +699,33 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                     }
                     // Guard all layout-invalidating calls — avoids scroll jank from timer recompositions.
                     val newStyle = EditorStyle(editorFgInt, fontSize.toFloat(), lineSpacing,
-                                               marginWidthPx, marginHeightPx, fileWritable, hemingwayMode)
+                                               marginWidthPx, marginHeightPx, fileWritable, hemingwayMode,
+                                               fontFamily, fontBold, blockCursor)
                     if (lastStyle[0] != newStyle) {
                         editText.setTextColor(newStyle.fgColor)
+                        if (newStyle.fontFamily != lastStyle[0].fontFamily || newStyle.fontBold != lastStyle[0].fontBold) {
+                            editText.typeface = Typeface.create(newStyle.fontFamily,
+                                if (newStyle.fontBold) Typeface.BOLD else Typeface.NORMAL)
+                        }
                         editText.setTextSize(TypedValue.COMPLEX_UNIT_SP, newStyle.fontSizeSp)
                         editText.setLineSpacing(0f, newStyle.lineSpacingMult)
                         editText.setPadding(newStyle.padX, newStyle.padY, newStyle.padX, newStyle.padY)
                         editText.keyListener = if (newStyle.writable) originalKeyListener[0] else null
                         editText.filters = if (newStyle.hemingway && newStyle.writable)
                             arrayOf(hemingwayFilter) else emptyArray()
+                        // Block cursor: Android has no native -blockcursor like Tk; emulate it with a
+                        // custom cursor drawable sized to one character's width × the line height,
+                        // filled with the foreground colour (matches Tk's -insertbackground $fg).
+                        // setTextCursorDrawable is API 29+ — older devices keep the default thin caret.
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            editText.textCursorDrawable = if (newStyle.blockCursor) {
+                                val charWidth = editText.paint.measureText("M").toInt().coerceAtLeast(1)
+                                GradientDrawable().apply {
+                                    setColor(newStyle.fgColor)
+                                    setSize(charWidth, editText.lineHeight)
+                                }
+                            } else null
+                        }
                         lastStyle[0] = newStyle
                     }
 
@@ -646,9 +743,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                             ctrl && keyCode == AKeyEvent.KEYCODE_F -> { showFind = true; true }
                             ctrl && keyCode == AKeyEvent.KEYCODE_H -> { showFind = true; findReplace = true; true }
                             ctrl && keyCode == AKeyEvent.KEYCODE_G -> { showGotoLine = true; true }
-                            ctrl && keyCode == AKeyEvent.KEYCODE_Q -> {
-                                vm.saveCursor(editText.selectionStart); onBack(); true
-                            }
+                            ctrl && keyCode == AKeyEvent.KEYCODE_Q -> { requestClose(); true }
                             !ctrl && keyCode == AKeyEvent.KEYCODE_ESCAPE && showFind -> {
                                 showFind = false; findQuery = ""; findReplace = false; true
                             }
@@ -883,6 +978,23 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 ) { Text("Discard") }
             },
             dismissButton = { TextButton(onClick = { showDiscardConfirm = false }) { Text("Stay") } }
+        )
+    }
+
+    if (showSaveConfirm) {
+        AlertDialog(
+            onDismissRequest = { showSaveConfirm = false },
+            title = { Text("Save changes?") },
+            text = { Text("This document has unsaved changes.") },
+            confirmButton = {
+                TextButton(onClick = { showSaveConfirm = false; vm.saveFile(); doBack() }) { Text("Save") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { showSaveConfirm = false; doBack() }) { Text("Don't save") }
+                    TextButton(onClick = { showSaveConfirm = false }) { Text("Cancel") }
+                }
+            }
         )
     }
 

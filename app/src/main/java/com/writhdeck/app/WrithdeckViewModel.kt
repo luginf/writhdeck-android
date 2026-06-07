@@ -46,10 +46,19 @@ data class WsSnapshot(
 data class SettingsData(
     val scheme: String = "default",
     val fontSize: Int = 16,
+    val fontFamily: String = "monospace",
+    val fontBold: Boolean = false,
+    val blockCursor: Boolean = false,
     val marginWidth: Int = 16,
     val marginHeight: Int = 16,
     val wordGoal: Int = 0,
     val headingMarker: String = "=",
+    val markdownHeadings: Boolean = true,
+    val commentMarker: String = "%",
+    val boldMarker: String = "**",
+    val italicMarker: String = "//",
+    val underlineMarker: String = "__",
+    val strikethroughMarker: String = "--",
     val autosaveEnabled: Boolean = true,
     val autosaveInterval: Int = 1,
     val timerType: String = "countdown",
@@ -111,12 +120,29 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     val markdownHeadings = _markdownHeadings.asStateFlow()
     private val _keyToc = MutableStateFlow("F11")
     val keyToc = _keyToc.asStateFlow()
+    private val _commentMarker = MutableStateFlow("%")
+    val commentMarker = _commentMarker.asStateFlow()
+    private val _boldMarker = MutableStateFlow("**")
+    val boldMarker = _boldMarker.asStateFlow()
+    private val _italicMarker = MutableStateFlow("//")
+    val italicMarker = _italicMarker.asStateFlow()
+    private val _underlineMarker = MutableStateFlow("__")
+    val underlineMarker = _underlineMarker.asStateFlow()
+    private val _strikethroughMarker = MutableStateFlow("--")
+    val strikethroughMarker = _strikethroughMarker.asStateFlow()
     private val _marginWidth = MutableStateFlow(16)
     val marginWidth = _marginWidth.asStateFlow()
     private val _marginHeight = MutableStateFlow(16)
     val marginHeight = _marginHeight.asStateFlow()
     private val _fontSize = MutableStateFlow(16)
     val fontSize = _fontSize.asStateFlow()
+    private val _fontFamily = MutableStateFlow("monospace")
+    val fontFamily = _fontFamily.asStateFlow()
+    private val _fontBold = MutableStateFlow(false)
+    val fontBold = _fontBold.asStateFlow()
+
+    private val _blockCursor = MutableStateFlow(false)
+    val blockCursor = _blockCursor.asStateFlow()
 
     private val _timerType = MutableStateFlow("countdown")
     val timerType = _timerType.asStateFlow()
@@ -219,11 +245,19 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     private fun applyConfig() {
         _headingMarker.value = config.headingMarker
         _markdownHeadings.value = config.markdownHeadings
+        _commentMarker.value = config.commentMarker
+        _boldMarker.value = config.boldMarker
+        _italicMarker.value = config.italicMarker
+        _underlineMarker.value = config.underlineMarker
+        _strikethroughMarker.value = config.strikethroughMarker
         _keyToc.value = config.keyToc
         _timerType.value = config.timerType
         _marginWidth.value = config.marginWidth
         _marginHeight.value = config.marginHeight
         _fontSize.value = config.fontSize
+        _fontFamily.value = config.fontFamily
+        _fontBold.value = config.fontBold
+        _blockCursor.value = config.blockCursor
         _darkModePreference.value = config.androidDarkMode
         _customSchemes.value = config.customSchemes
         _activeScheme.value = config.scheme
@@ -843,10 +877,19 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     fun getSettingsData() = SettingsData(
         scheme           = config.scheme,
         fontSize         = config.fontSize,
+        fontFamily       = config.fontFamily,
+        fontBold         = config.fontBold,
+        blockCursor      = config.blockCursor,
         marginWidth      = config.marginWidth,
         marginHeight     = config.marginHeight,
         wordGoal         = config.wordGoal,
         headingMarker    = config.headingMarker,
+        markdownHeadings = config.markdownHeadings,
+        commentMarker    = config.commentMarker,
+        boldMarker       = config.boldMarker,
+        italicMarker     = config.italicMarker,
+        underlineMarker  = config.underlineMarker,
+        strikethroughMarker = config.strikethroughMarker,
         autosaveEnabled  = config.autosaveEnabled,
         autosaveInterval = config.autosaveInterval,
         timerType        = config.timerType,
@@ -865,10 +908,19 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         config = config.copy(
             scheme           = s.scheme,
             fontSize         = s.fontSize,
+            fontFamily       = s.fontFamily,
+            fontBold         = s.fontBold,
+            blockCursor      = s.blockCursor,
             marginWidth      = s.marginWidth,
             marginHeight     = s.marginHeight,
             wordGoal         = s.wordGoal,
             headingMarker    = s.headingMarker,
+            markdownHeadings = s.markdownHeadings,
+            commentMarker    = s.commentMarker,
+            boldMarker       = s.boldMarker,
+            italicMarker     = s.italicMarker,
+            underlineMarker  = s.underlineMarker,
+            strikethroughMarker = s.strikethroughMarker,
             autosaveEnabled  = s.autosaveEnabled,
             autosaveInterval = s.autosaveInterval,
             timerType        = s.timerType,
@@ -890,10 +942,19 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             var text = if (iniFile.exists()) iniFile.readText() else IniParser.write(config)
             text = IniParser.patchKeys(text,
                 "font_size"         to s.fontSize.toString(),
+                "font_family"       to s.fontFamily,
+                "font_bold"         to b(s.fontBold),
+                "block_cursor"      to b(s.blockCursor),
                 "margin_width"      to s.marginWidth.toString(),
                 "margin_height"     to s.marginHeight.toString(),
                 "word_goal"         to s.wordGoal.toString(),
                 "heading_marker"    to s.headingMarker,
+                "markdown_headings" to b(s.markdownHeadings),
+                "comment_marker"    to s.commentMarker,
+                "bold_marker"       to s.boldMarker,
+                "italic_marker"     to s.italicMarker,
+                "underline_marker"  to s.underlineMarker,
+                "strikethrough_marker" to s.strikethroughMarker,
                 "autosave_enabled"  to b(s.autosaveEnabled),
                 "autosave_interval" to s.autosaveInterval.toString(),
                 "timer_type"        to s.timerType,
