@@ -22,9 +22,11 @@ import android.widget.OverScroller
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -37,6 +39,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.outlined.DarkMode
@@ -236,20 +239,56 @@ fun applyHeadingResult(text: String, selStart: Int, selEnd: Int, marker: String)
     return Triple(newText, lineStart, lineStart + newLines.length)
 }
 
-fun tkKeyToAndroid(tkName: String): Key? = when (tkName.trim()) {
-    "F1"  -> Key.F1;  "F2"  -> Key.F2;  "F3"  -> Key.F3;  "F4"  -> Key.F4
-    "F5"  -> Key.F5;  "F6"  -> Key.F6;  "F7"  -> Key.F7;  "F8"  -> Key.F8
-    "F9"  -> Key.F9;  "F10" -> Key.F10; "F11" -> Key.F11; "F12" -> Key.F12
-    "Escape"    -> Key.Escape
-    "Return"    -> Key.Enter
-    "Tab"       -> Key.Tab
-    "BackSpace" -> Key.Backspace
-    "Delete"    -> Key.Delete
-    "Home"      -> Key.MoveHome
-    "End"       -> Key.MoveEnd
-    "Prior"     -> Key.PageUp
-    "Next"      -> Key.PageDown
-    else -> null
+/** A parsed Tk key binding (e.g. "Control-s", "F11", "Control-S") — native Android key code
+ *  plus the modifier flags that must (and must not) be held, matched against a raw [AKeyEvent]. */
+data class TkBinding(val keyCode: Int, val ctrl: Boolean = false, val shift: Boolean = false, val alt: Boolean = false) {
+    fun matches(code: Int, event: AKeyEvent): Boolean =
+        code == keyCode && event.isCtrlPressed == ctrl && event.isAltPressed == alt && event.isShiftPressed == shift
+}
+
+private val TK_NAMED_KEYS = mapOf(
+    "F1" to AKeyEvent.KEYCODE_F1,   "F2" to AKeyEvent.KEYCODE_F2,
+    "F3" to AKeyEvent.KEYCODE_F3,   "F4" to AKeyEvent.KEYCODE_F4,
+    "F5" to AKeyEvent.KEYCODE_F5,   "F6" to AKeyEvent.KEYCODE_F6,
+    "F7" to AKeyEvent.KEYCODE_F7,   "F8" to AKeyEvent.KEYCODE_F8,
+    "F9" to AKeyEvent.KEYCODE_F9,   "F10" to AKeyEvent.KEYCODE_F10,
+    "F11" to AKeyEvent.KEYCODE_F11, "F12" to AKeyEvent.KEYCODE_F12,
+    "Escape"    to AKeyEvent.KEYCODE_ESCAPE,
+    "Return"    to AKeyEvent.KEYCODE_ENTER,
+    "Tab"       to AKeyEvent.KEYCODE_TAB,
+    "BackSpace" to AKeyEvent.KEYCODE_DEL,
+    "Delete"    to AKeyEvent.KEYCODE_FORWARD_DEL,
+    "Home"      to AKeyEvent.KEYCODE_MOVE_HOME,
+    "End"       to AKeyEvent.KEYCODE_MOVE_END,
+    "Prior"     to AKeyEvent.KEYCODE_PAGE_UP,
+    "Next"      to AKeyEvent.KEYCODE_PAGE_DOWN
+)
+
+/** Parses a Tk key-binding string ("Control-s", "Control-S", "F11", "Alt-Return", ...) into a
+ *  [TkBinding]. Modifiers are dash-separated prefixes (Control/Shift/Alt, case-insensitive); a
+ *  single uppercase letter implies Shift (Tk convention — "Control-S" == Control+Shift+s). */
+fun tkKeyToAndroid(tkName: String): TkBinding? {
+    val parts = tkName.trim().split("-").filter { it.isNotEmpty() }
+    if (parts.isEmpty()) return null
+    val keyPart = parts.last()
+    var ctrl = false; var shift = false; var alt = false
+    for (mod in parts.dropLast(1)) when (mod.lowercase()) {
+        "control", "ctrl"       -> ctrl = true
+        "shift"                 -> shift = true
+        "alt", "meta", "option" -> alt = true
+    }
+    val keyCode = TK_NAMED_KEYS[keyPart] ?: run {
+        if (keyPart.length != 1) return@run null
+        val c = keyPart[0]
+        if (c.isUpperCase()) shift = true
+        val u = c.uppercaseChar()
+        when {
+            u in 'A'..'Z' -> AKeyEvent.KEYCODE_A + (u - 'A')
+            u in '0'..'9' -> AKeyEvent.KEYCODE_0 + (u - '0')
+            else -> null
+        }
+    } ?: return null
+    return TkBinding(keyCode, ctrl, shift, alt)
 }
 
 fun formatTimer(seconds: Int, active: Boolean): String {
@@ -292,6 +331,11 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val italicMarker by vm.italicMarker.collectAsStateWithLifecycle()
     val underlineMarker by vm.underlineMarker.collectAsStateWithLifecycle()
     val strikethroughMarker by vm.strikethroughMarker.collectAsStateWithLifecycle()
+    val keySave by vm.keySave.collectAsStateWithLifecycle()
+    val keyFind by vm.keyFind.collectAsStateWithLifecycle()
+    val keyReplace by vm.keyReplace.collectAsStateWithLifecycle()
+    val keyGoto by vm.keyGoto.collectAsStateWithLifecycle()
+    val keyClose by vm.keyClose.collectAsStateWithLifecycle()
     val keyToc by vm.keyToc.collectAsStateWithLifecycle()
     val marginWidth by vm.marginWidth.collectAsStateWithLifecycle()
     val marginHeight by vm.marginHeight.collectAsStateWithLifecycle()
@@ -302,8 +346,12 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val lineSpacing by vm.lineSpacing.collectAsStateWithLifecycle()
     val hemingwayMode by vm.hemingwayMode.collectAsStateWithLifecycle()
     val toc by vm.toc.collectAsStateWithLifecycle()
-    val tocAndroidKey = remember(keyToc) { tkKeyToAndroid(keyToc) }
-    val tocKeyCode = remember(tocAndroidKey) { tocAndroidKey?.keyCode?.toInt() }
+    val saveBinding = remember(keySave) { tkKeyToAndroid(keySave) }
+    val findBinding = remember(keyFind) { tkKeyToAndroid(keyFind) }
+    val replaceBinding = remember(keyReplace) { tkKeyToAndroid(keyReplace) }
+    val gotoBinding = remember(keyGoto) { tkKeyToAndroid(keyGoto) }
+    val closeBinding = remember(keyClose) { tkKeyToAndroid(keyClose) }
+    val tocBinding = remember(keyToc) { tkKeyToAndroid(keyToc) }
 
     val timerActive by vm.timerActive.collectAsStateWithLifecycle()
     val timerRemaining by vm.timerRemaining.collectAsStateWithLifecycle()
@@ -411,6 +459,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     }
 
     var showToc by remember { mutableStateOf(false) }
+    var tocPinned by rememberSaveable { mutableStateOf(false) }
 
     var showFind by remember { mutableStateOf(false) }
     var findReplace by remember { mutableStateOf(false) }
@@ -736,14 +785,14 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                         when {
                             hemingwayMode && (keyCode == AKeyEvent.KEYCODE_DEL ||
                                 keyCode == AKeyEvent.KEYCODE_FORWARD_DEL) -> true
-                            tocKeyCode != null && keyCode == tocKeyCode && toc.isNotEmpty() -> {
+                            tocBinding != null && tocBinding.matches(keyCode, event) && toc.isNotEmpty() -> {
                                 showToc = true; true
                             }
-                            ctrl && keyCode == AKeyEvent.KEYCODE_S -> { if (fileWritable) vm.saveFile(); true }
-                            ctrl && keyCode == AKeyEvent.KEYCODE_F -> { showFind = true; true }
-                            ctrl && keyCode == AKeyEvent.KEYCODE_H -> { showFind = true; findReplace = true; true }
-                            ctrl && keyCode == AKeyEvent.KEYCODE_G -> { showGotoLine = true; true }
-                            ctrl && keyCode == AKeyEvent.KEYCODE_Q -> { requestClose(); true }
+                            saveBinding?.matches(keyCode, event) == true -> { if (fileWritable) vm.saveFile(); true }
+                            findBinding?.matches(keyCode, event) == true -> { showFind = true; true }
+                            replaceBinding?.matches(keyCode, event) == true -> { showFind = true; findReplace = true; true }
+                            gotoBinding?.matches(keyCode, event) == true -> { showGotoLine = true; true }
+                            closeBinding?.matches(keyCode, event) == true -> { requestClose(); true }
                             !ctrl && keyCode == AKeyEvent.KEYCODE_ESCAPE && showFind -> {
                                 showFind = false; findQuery = ""; findReplace = false; true
                             }
@@ -892,11 +941,62 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
 
     // TOC sheet
     if (showToc) {
+        val tocListState = rememberLazyListState()
+        val tocFocusRequester = remember { FocusRequester() }
+        var tocFocusedIndex by remember(showToc) { mutableIntStateOf(-1) }
+        val tocScope = rememberCoroutineScope()
+
+        fun tocMove(delta: Int) {
+            if (toc.isEmpty()) return
+            val next = if (tocFocusedIndex < 0) (if (delta > 0) 0 else toc.lastIndex)
+                       else ((tocFocusedIndex + delta) % toc.size + toc.size) % toc.size
+            tocFocusedIndex = next
+            tocScope.launch { tocListState.animateScrollToItem(next) }
+        }
+
+        fun tocSelect(entry: TocEntry) {
+            editorRef.value?.setSelection(entry.charOffset.coerceIn(0, content.length))
+            if (!tocPinned) showToc = false
+        }
+
+        LaunchedEffect(showToc) {
+            if (showToc) tocFocusRequester.requestFocus()
+        }
+
         ModalBottomSheet(onDismissRequest = { showToc = false }) {
-            Text("Table of contents", style = MaterialTheme.typography.titleMedium,
-                 modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp))
-            LazyColumn(contentPadding = PaddingValues(bottom = 32.dp)) {
-                itemsIndexed(toc) { _, entry ->
+            Row(verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, bottom = 8.dp)) {
+                Text("Table of contents", style = MaterialTheme.typography.titleMedium,
+                     modifier = Modifier.weight(1f))
+                IconButton(onClick = { tocPinned = !tocPinned }) {
+                    Icon(
+                        Icons.Filled.PushPin,
+                        contentDescription = if (tocPinned) "Unpin TOC" else "Pin TOC",
+                        tint = if (tocPinned) colorScheme.primary else colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            LazyColumn(
+                state = tocListState,
+                contentPadding = PaddingValues(bottom = 32.dp),
+                modifier = Modifier
+                    .focusRequester(tocFocusRequester)
+                    .focusable()
+                    .onKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                        when (event.key) {
+                            Key.DirectionDown -> { tocMove(1); true }
+                            Key.DirectionUp -> { tocMove(-1); true }
+                            Key.Enter, Key.NumPadEnter -> {
+                                if (tocFocusedIndex in toc.indices) tocSelect(toc[tocFocusedIndex])
+                                true
+                            }
+                            Key.Escape -> { showToc = false; true }
+                            else -> false
+                        }
+                    }
+            ) {
+                itemsIndexed(toc) { index, entry ->
                     val indent = (entry.level - 1) * 16
                     Text(
                         text = entry.title,
@@ -904,10 +1004,10 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                         fontWeight = if (entry.level == 1) FontWeight.Bold else FontWeight.Normal,
                         fontSize = when (entry.level) { 1 -> 16.sp; 2 -> 15.sp; else -> 14.sp },
                         color = if (entry.level == 1) colorScheme.primary else colorScheme.onSurface,
-                        modifier = Modifier.fillMaxWidth().clickable {
-                            editorRef.value?.setSelection(entry.charOffset.coerceIn(0, content.length))
-                            showToc = false
-                        }.padding(start = (20 + indent).dp, end = 20.dp, top = 10.dp, bottom = 10.dp)
+                        modifier = Modifier.fillMaxWidth()
+                            .background(if (index == tocFocusedIndex) colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
+                            .clickable { tocFocusedIndex = index; tocSelect(entry) }
+                            .padding(start = (20 + indent).dp, end = 20.dp, top = 10.dp, bottom = 10.dp)
                     )
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 20.dp))
                 }

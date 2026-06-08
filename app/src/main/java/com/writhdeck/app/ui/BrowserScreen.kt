@@ -7,6 +7,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -40,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.writhdeck.app.DocEntry
 import com.writhdeck.app.WrithdeckViewModel
+import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -99,6 +101,49 @@ fun BrowserScreen(
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
     var imeAllowed by remember { mutableStateOf(false) }
     var shortcutBuffer by remember { mutableStateOf(TextFieldValue("")) }
+
+    // Arrow-key navigation over the visible file list — mirrors the web version's
+    // ArrowUp/ArrowDown handling of `.br-nav-item` rows (ordered Favorites -> Documents -> Recent).
+    val listState = rememberLazyListState()
+    val navScope = rememberCoroutineScope()
+    val navEntries = favoriteDocs + docs + recentOnly
+
+    // Absolute LazyColumn item index for `entry` — must mirror the `item`/`items` emission
+    // order in the LazyColumn below (scratchpad, permission banner, Favorites, Documents, Recent).
+    fun navItemIndex(entry: DocEntry): Int {
+        var idx = 1 // scratchpad row
+        if (!storageGranted && !permissionBannerDismissed) idx++
+        if (favoriteDocs.isNotEmpty()) {
+            idx++
+            val i = favoriteDocs.indexOfFirst { it.path == entry.path }
+            if (i >= 0) return idx + i
+            idx += favoriteDocs.size
+        }
+        idx++ // "Documents" header
+        if (docs.isEmpty()) {
+            idx++ // empty placeholder row
+        } else {
+            val i = docs.indexOfFirst { it.path == entry.path }
+            if (i >= 0) return idx + i
+            idx += docs.size
+        }
+        if (recentOnly.isNotEmpty()) {
+            idx++ // "Recent" header
+            val i = recentOnly.indexOfFirst { it.path == entry.path }
+            if (i >= 0) return idx + i
+        }
+        return idx
+    }
+
+    fun navMove(delta: Int) {
+        if (navEntries.isEmpty()) return
+        val cur = selectedEntry?.let { e -> navEntries.indexOfFirst { it.path == e.path } } ?: -1
+        val next = if (cur < 0) (if (delta > 0) 0 else navEntries.lastIndex)
+                   else ((cur + delta) % navEntries.size + navEntries.size) % navEntries.size
+        val entry = navEntries[next]
+        selectedEntry = entry
+        navScope.launch { listState.animateScrollToItem(navItemIndex(entry)) }
+    }
 
     fun handleShortcut(ch: Char) {
         shortcutBuffer = TextFieldValue("")
@@ -170,6 +215,7 @@ fun BrowserScreen(
         } else {
             Box(Modifier.fillMaxSize().padding(padding)) {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize()
                 ) {
                     // Scratchpad — always-visible quick note
@@ -329,6 +375,17 @@ fun BrowserScreen(
                         }
                         .onKeyEvent { event ->
                             if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                            when (event.key) {
+                                Key.DirectionDown -> { navMove(1); return@onKeyEvent true }
+                                Key.DirectionUp   -> { navMove(-1); return@onKeyEvent true }
+                                Key.Enter, Key.NumPadEnter -> {
+                                    selectedEntry?.let { entry ->
+                                        imeAllowed = false; onOpenFile(entry)
+                                    }
+                                    return@onKeyEvent true
+                                }
+                                else -> {}
+                            }
                             val ch = event.nativeKeyEvent.unicodeChar.toChar()
                             if (ch.isLetter()) { handleShortcut(ch); true } else false
                         }

@@ -42,6 +42,11 @@ data class AppConfig(
     val timerAlert: Boolean = false,
     val chronoShow: Boolean = false,
     val wordGoal: Int = 0,
+    val keySave: String = "Control-s",
+    val keyFind: String = "Control-f",
+    val keyReplace: String = "Control-h",
+    val keyGoto: String = "Control-g",
+    val keyClose: String = "Control-q",
     val keyToc: String = "F11",
     val docsCustomDir: String = "",
     val activeProfile: String = "default",
@@ -148,6 +153,11 @@ object IniParser {
             timerAlert       = bool("timer_alert", false),
             chronoShow       = bool("chrono_show", false),
             wordGoal         = int("word_goal", 0).coerceAtLeast(0),
+            keySave          = str("key_save", "Control-s"),
+            keyFind          = str("key_find", "Control-f"),
+            keyReplace       = str("key_replace", "Control-h"),
+            keyGoto          = str("key_goto", "Control-g"),
+            keyClose         = str("key_close", "Control-q"),
             keyToc           = str("key_toc", "F11"),
             docsCustomDir    = keys["docs_dir"] ?: "",
             activeProfile    = activeProfile,
@@ -201,6 +211,12 @@ object IniParser {
             if (config.docsCustomDir.isNotEmpty()) appendLine("docs_dir = ${config.docsCustomDir}")
             appendLine()
             appendLine("= keys =")
+            appendLine("% Use Tk key names: Control-s, Alt-Return, F11, etc.")
+            appendLine("key_save = ${config.keySave}")
+            appendLine("key_find = ${config.keyFind}")
+            appendLine("key_replace = ${config.keyReplace}")
+            appendLine("key_goto = ${config.keyGoto}")
+            appendLine("key_close = ${config.keyClose}")
             appendLine("key_toc = ${config.keyToc}")
             appendLine()
             appendLine("= profiles =")
