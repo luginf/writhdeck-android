@@ -1,6 +1,10 @@
 package com.writhdeck.app.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -12,6 +16,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -146,9 +157,34 @@ private fun FontPreview(familyName: String, fontSizeSp: Int, bold: Boolean) {
 private fun FontFamilySettingRow(selected: String, onChange: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     val current = remember(selected) { EDITOR_FONTS.firstOrNull { it.familyName == selected } ?: EDITOR_FONTS[0] }
+    val interactionSource = remember { MutableInteractionSource() }
+    val focused by interactionSource.collectIsFocusedAsState()
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(if (focused) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
+            .focusable(interactionSource = interactionSource)
+            .onKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                when (event.key) {
+                    Key.Spacebar, Key.Enter, Key.NumPadEnter, Key.DirectionCenter -> {
+                        expanded = !expanded
+                        true
+                    }
+                    Key.DirectionDown -> {
+                        val i = EDITOR_FONTS.indexOf(current)
+                        onChange(EDITOR_FONTS[(i + 1).mod(EDITOR_FONTS.size)].familyName)
+                        true
+                    }
+                    Key.DirectionUp -> {
+                        val i = EDITOR_FONTS.indexOf(current)
+                        onChange(EDITOR_FONTS[(i - 1).mod(EDITOR_FONTS.size)].familyName)
+                        true
+                    }
+                    Key.Escape -> if (expanded) { expanded = false; true } else false
+                    else -> false
+                }
+            }
             .padding(horizontal = 16.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -168,7 +204,9 @@ private fun FontFamilySettingRow(selected: String, onChange: (String) -> Unit) {
                 readOnly = true,
                 singleLine = true,
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                modifier = Modifier.menuAnchor(type = MenuAnchorType.PrimaryNotEditable),
+                modifier = Modifier
+                    .menuAnchor(type = MenuAnchorType.PrimaryNotEditable)
+                    .focusProperties { canFocus = false },
                 textStyle = MaterialTheme.typography.bodyMedium.copy(
                     fontFamily = FontFamily(Typeface.create(current.familyName, Typeface.NORMAL))
                 )
@@ -318,9 +356,23 @@ private fun SwitchSettingRow(
     checked: Boolean,
     onChange: (Boolean) -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val focused by interactionSource.collectIsFocusedAsState()
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(if (focused) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
+            .focusable(interactionSource = interactionSource)
+            .onKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                when (event.key) {
+                    Key.Spacebar, Key.Enter, Key.NumPadEnter, Key.DirectionCenter -> {
+                        onChange(!checked)
+                        true
+                    }
+                    else -> false
+                }
+            }
             .padding(horizontal = 16.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -407,9 +459,34 @@ private fun DropdownSettingRow(
     onChange: (String) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
+    val interactionSource = remember { MutableInteractionSource() }
+    val focused by interactionSource.collectIsFocusedAsState()
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(if (focused) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
+            .focusable(interactionSource = interactionSource)
+            .onKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                when (event.key) {
+                    Key.Spacebar, Key.Enter, Key.NumPadEnter, Key.DirectionCenter -> {
+                        expanded = !expanded
+                        true
+                    }
+                    Key.DirectionDown -> {
+                        val i = options.indexOf(selected)
+                        if (i >= 0) onChange(options[(i + 1).mod(options.size)])
+                        true
+                    }
+                    Key.DirectionUp -> {
+                        val i = options.indexOf(selected)
+                        if (i >= 0) onChange(options[(i - 1).mod(options.size)])
+                        true
+                    }
+                    Key.Escape -> if (expanded) { expanded = false; true } else false
+                    else -> false
+                }
+            }
             .padding(horizontal = 16.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -429,7 +506,9 @@ private fun DropdownSettingRow(
                 readOnly = true,
                 singleLine = true,
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                modifier = Modifier.menuAnchor(type = MenuAnchorType.PrimaryNotEditable),
+                modifier = Modifier
+                    .menuAnchor(type = MenuAnchorType.PrimaryNotEditable)
+                    .focusProperties { canFocus = false },
                 textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace)
             )
             ExposedDropdownMenu(

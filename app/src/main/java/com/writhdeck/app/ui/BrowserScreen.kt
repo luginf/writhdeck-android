@@ -1,5 +1,6 @@
 package com.writhdeck.app.ui
 
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -145,20 +146,29 @@ fun BrowserScreen(
         navScope.launch { listState.animateScrollToItem(navItemIndex(entry)) }
     }
 
+    val backDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+
     fun handleShortcut(ch: Char) {
         shortcutBuffer = TextFieldValue("")
+        // r/d/b/f/i act on the highlighted entry, defaulting to the first
+        // visible entry if none has been highlighted yet via arrow keys
+        // (mirrors Tcl, where the browser always has a row selected).
+        val entry = selectedEntry ?: navEntries.firstOrNull()?.also { selectedEntry = it }
         when (ch.lowercaseChar()) {
             'n' -> showNewDialog = true
             't' -> { imeAllowed = false; onOpenScratchpad() }
             'c' -> onNavigateSettings()
-            'f' -> selectedEntry?.let { vm.toggleFavorite(it) }
-            'r' -> selectedEntry?.let {
+            'f' -> entry?.let { vm.toggleFavorite(it) }
+            'r' -> entry?.let {
                 contextEntry = it
                 renameValue = it.name.substringBeforeLast('.')
                 showRenameDialog = true
             }
-            'd' -> selectedEntry?.let { contextEntry = it; showDeleteConfirm = true }
-            'b' -> selectedEntry?.let { vm.backupFile(it) }
+            'd' -> entry?.let { contextEntry = it; showDeleteConfirm = true }
+            'b' -> entry?.let { vm.backupFile(it) }
+            'i' -> entry?.let { contextEntry = it; showInfoDialog = true }
+            'z' -> vm.refreshDocs()
+            'q' -> backDispatcher?.onBackPressed()
             else -> {}
         }
     }

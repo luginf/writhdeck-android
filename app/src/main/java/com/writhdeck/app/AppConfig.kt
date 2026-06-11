@@ -48,6 +48,9 @@ data class AppConfig(
     val keyGoto: String = "Control-g",
     val keyClose: String = "Control-q",
     val keyToc: String = "F11",
+    val keyTypewriter: String = "Control-t",
+    val keyLineNumbers: String = "Control-l",
+    val keyCmdMode: String = "Escape",
     val docsCustomDir: String = "",
     val activeProfile: String = "default",
     val customSchemes: Map<String, SchemeColors> = emptyMap(),
@@ -61,6 +64,7 @@ data class AppConfig(
     val statusCenter: String = "words",
     val statusRight: String = "timer",
     val hemingwayMode: Boolean = false,
+    val lineNumbers: Boolean = false,
     val lineSpacing: Float = 1.5f
 ) {
     fun schemeColors(): SchemeColors =
@@ -159,6 +163,9 @@ object IniParser {
             keyGoto          = str("key_goto", "Control-g"),
             keyClose         = str("key_close", "Control-q"),
             keyToc           = str("key_toc", "F11"),
+            keyTypewriter    = str("key_typewriter", "Control-t"),
+            keyLineNumbers   = str("key_line_numbers", "Control-l"),
+            keyCmdMode       = str("key_cmd_mode", "Escape"),
             docsCustomDir    = keys["docs_dir"] ?: "",
             activeProfile    = activeProfile,
             customSchemes    = customSchemes,
@@ -174,6 +181,7 @@ object IniParser {
             statusCenter     = str("status_center", "words"),
             statusRight      = str("status_right",  "timer"),
             hemingwayMode    = bool("hemingway_mode", false),
+            lineNumbers      = bool("line_numbers", false),
             lineSpacing      = keys["line_spacing"]?.toFloatOrNull()?.coerceIn(0.8f, 3.0f) ?: 1.5f
         )
     }
@@ -192,6 +200,7 @@ object IniParser {
             appendLine("autosave_enabled = yes")
             appendLine("autosave_interval = 1")
             appendLine("hemingway_mode = ${bool(config.hemingwayMode)}")
+            appendLine("line_numbers = ${bool(config.lineNumbers)}")
             appendLine("line_spacing = ${config.lineSpacing}")
             appendLine()
             appendLine("= status_bar =")
@@ -218,6 +227,9 @@ object IniParser {
             appendLine("key_goto = ${config.keyGoto}")
             appendLine("key_close = ${config.keyClose}")
             appendLine("key_toc = ${config.keyToc}")
+            appendLine("key_typewriter = ${config.keyTypewriter}")
+            appendLine("key_line_numbers = ${config.keyLineNumbers}")
+            appendLine("key_cmd_mode = ${config.keyCmdMode}")
             appendLine()
             appendLine("= profiles =")
             appendLine()

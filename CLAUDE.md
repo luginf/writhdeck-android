@@ -111,7 +111,12 @@ The editor uses `AndroidView { FlingEditText }` (a private `EditText` subclass �
 
 **Undo/redo** — native Android EditText handles Ctrl+Z automatically (API 23+, minSdk=26). No `ArrayDeque` needed.
 
-**Heading toggle** — `applyHeadingResult(text, selStart, selEnd, marker): Triple<String, Int, Int>?` returns new text + selection. Apply: `ignoreTextChange[0] = true; editText.setText(newText); editText.setSelection(...); ignoreTextChange[0] = false; vm.updateContent(newText)`.
+**Format menu (≡ → Format)** — three pure functions, ports of `editor.js`'s `applyHeading`/`applyLineMarker`/`applyInlineMarker`, all `(text, selStart, selEnd, marker[, level]): Triple<String, Int, Int>?` (`null` if marker empty):
+- `applyHeadingLevel(text, selStart, selEnd, marker, level)` — H1/H2/H3, repeats `marker` ×`level`, detects/replaces existing heading level.
+- `applyLineMarkerResult(text, selStart, selEnd, marker)` — Comment, toggles `marker` at the start of each selected line.
+- `applyInlineMarkerResult(text, selStart, selEnd, marker)` — Bold/Italic/Underline/Strike, wraps/unwraps the selection with `marker...marker`, or inserts `marker+marker` with cursor between if no selection.
+
+Apply via shared helper `applyEditResult(r: Triple<String, Int, Int>?)`: `ignoreTextChange[0] = true; editText.setText(newText); editText.setSelection(...); ignoreTextChange[0] = false; vm.updateContent(newText)`.
 
 **TOC navigation** — `editorRef.value?.setSelection(entry.charOffset)`.
 

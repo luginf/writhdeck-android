@@ -130,6 +130,12 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     val keyClose = _keyClose.asStateFlow()
     private val _keyToc = MutableStateFlow("F11")
     val keyToc = _keyToc.asStateFlow()
+    private val _keyTypewriter = MutableStateFlow("Control-t")
+    val keyTypewriter = _keyTypewriter.asStateFlow()
+    private val _keyLineNumbers = MutableStateFlow("Control-l")
+    val keyLineNumbers = _keyLineNumbers.asStateFlow()
+    private val _keyCmdMode = MutableStateFlow("Escape")
+    val keyCmdMode = _keyCmdMode.asStateFlow()
     private val _commentMarker = MutableStateFlow("%")
     val commentMarker = _commentMarker.asStateFlow()
     private val _boldMarker = MutableStateFlow("**")
@@ -207,6 +213,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     private val _hemingwayMode = MutableStateFlow(false)
     val hemingwayMode = _hemingwayMode.asStateFlow()
 
+    private val _lineNumbersEnabled = MutableStateFlow(false)
+    val lineNumbersEnabled = _lineNumbersEnabled.asStateFlow()
+
     private val _lineSpacing = MutableStateFlow(1.5f)
     val lineSpacing = _lineSpacing.asStateFlow()
 
@@ -266,6 +275,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _keyGoto.value = config.keyGoto
         _keyClose.value = config.keyClose
         _keyToc.value = config.keyToc
+        _keyTypewriter.value = config.keyTypewriter
+        _keyLineNumbers.value = config.keyLineNumbers
+        _keyCmdMode.value = config.keyCmdMode
         _timerType.value = config.timerType
         _marginWidth.value = config.marginWidth
         _marginHeight.value = config.marginHeight
@@ -278,6 +290,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _activeScheme.value = config.scheme
         _themeColors.value = config.themeColors(resolveUseDark())
         _hemingwayMode.value = config.hemingwayMode
+        _lineNumbersEnabled.value = config.lineNumbers
         _lineSpacing.value = config.lineSpacing
         restartAutosave()
         startClockJob()
@@ -421,6 +434,32 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             val iniFile = File(docsDir, "writhdeck.ini")
             if (iniFile.exists()) {
                 iniFile.writeText(IniParser.patchKeys(iniFile.readText(), "android_dark_mode" to pref))
+            } else {
+                iniFile.writeText(IniParser.write(config))
+            }
+        }
+    }
+
+    fun setLineNumbersEnabled(enabled: Boolean) {
+        config = config.copy(lineNumbers = enabled)
+        _lineNumbersEnabled.value = enabled
+        viewModelScope.launch(Dispatchers.IO) {
+            val iniFile = File(docsDir, "writhdeck.ini")
+            if (iniFile.exists()) {
+                iniFile.writeText(IniParser.patchKeys(iniFile.readText(), "line_numbers" to if (enabled) "yes" else "no"))
+            } else {
+                iniFile.writeText(IniParser.write(config))
+            }
+        }
+    }
+
+    fun setBlockCursor(enabled: Boolean) {
+        config = config.copy(blockCursor = enabled)
+        _blockCursor.value = enabled
+        viewModelScope.launch(Dispatchers.IO) {
+            val iniFile = File(docsDir, "writhdeck.ini")
+            if (iniFile.exists()) {
+                iniFile.writeText(IniParser.patchKeys(iniFile.readText(), "block_cursor" to if (enabled) "yes" else "no"))
             } else {
                 iniFile.writeText(IniParser.write(config))
             }

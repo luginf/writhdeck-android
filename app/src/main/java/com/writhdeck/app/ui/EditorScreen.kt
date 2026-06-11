@@ -20,10 +20,14 @@ import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.OverScroller
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -59,6 +63,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -73,6 +78,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 // Marker span classes — used to find and remove old spans without touching unrelated ones.
 private class SyntaxHeadingSpan(color: Int) : ForegroundColorSpan(color)
@@ -81,6 +90,7 @@ private class SyntaxMarkupSpan(color: Int) : ForegroundColorSpan(color)
 private class SearchBgSpan(color: Int) : BackgroundColorSpan(color)
 private class SearchCurrentBgSpan(color: Int) : BackgroundColorSpan(color)
 private class SearchCurrentFgSpan(color: Int) : ForegroundColorSpan(color)
+private class TypewriterDimSpan(color: Int) : ForegroundColorSpan(color)
 
 /** EditText with fling-based momentum scrolling.
  *
@@ -93,6 +103,25 @@ private class SearchCurrentFgSpan(color: Int) : ForegroundColorSpan(color)
  *  does internally. */
 private class FlingEditText(context: Context) : EditText(context) {
     private val scroller = OverScroller(context)
+    var selectionChangeListener: (() -> Unit)? = null
+
+    override fun onSelectionChanged(selStart: Int, selEnd: Int) {
+        super.onSelectionChanged(selStart, selEnd)
+        selectionChangeListener?.invoke()
+    }
+
+    /** Typewriter mode: scroll so the line containing the cursor is vertically centred. */
+    fun centerCurrentLine() {
+        val l = layout ?: return
+        val visibleHeight = height - totalPaddingTop - totalPaddingBottom
+        if (visibleHeight <= 0) return
+        val line = l.getLineForOffset(selectionStart)
+        val lineTop = l.getLineTop(line)
+        val lineBottom = l.getLineBottom(line)
+        val target = lineTop + (lineBottom - lineTop) / 2 - visibleHeight / 2
+        val maxScroll = (l.height - visibleHeight).coerceAtLeast(0)
+        scrollTo(scrollX, target.coerceIn(0, maxScroll))
+    }
     private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
             if (hasSelection()) return false
@@ -216,27 +245,104 @@ fun applySyntaxSpansToEditable(editable: Editable, spans: List<SyntaxSpanData>) 
     }
 }
 
+/** Typewriter mode: dims every paragraph except the one containing the cursor
+ *  (mirrors Tcl's `focus-para-update` — paragraphs are separated by blank lines). */
+fun applyTypewriterDimming(editable: Editable, content: String, cursorPos: Int, enabled: Boolean, dimColorInt: Int) {
+    editable.getSpans(0, editable.length, TypewriterDimSpan::class.java).forEach { editable.removeSpan(it) }
+    if (!enabled || dimColorInt == 0) return
+    val pos = cursorPos.coerceIn(0, content.length)
+    var paraStart = content.lastIndexOf("\n\n", (pos - 1).coerceAtLeast(0))
+    paraStart = if (paraStart < 0) 0 else paraStart + 2
+    var paraEnd = content.indexOf("\n\n", pos)
+    paraEnd = if (paraEnd < 0) content.length else paraEnd
+    val s1 = paraStart.coerceIn(0, editable.length)
+    val s2 = paraEnd.coerceIn(0, editable.length)
+    if (s1 > 0) editable.setSpan(TypewriterDimSpan(dimColorInt), 0, s1, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+    if (s2 < editable.length) editable.setSpan(TypewriterDimSpan(dimColorInt), s2, editable.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+}
+
 // Returns (newText, selStart, selEnd) or null if marker is empty.
-fun applyHeadingResult(text: String, selStart: Int, selEnd: Int, marker: String): Triple<String, Int, Int>? {
+// Mirror of web's applyHeading(level) (writhdeck-web/src/editor.js): repeats `marker`
+// `level` times as prefix/suffix on each selected line; if every selected line is
+// already at that level, strips the heading back to plain text instead.
+fun applyHeadingLevel(text: String, selStart: Int, selEnd: Int, marker: String, level: Int): Triple<String, Int, Int>? {
     if (marker.isEmpty()) return null
     val minSel = minOf(selStart, selEnd)
     val maxSel = maxOf(selStart, selEnd)
-    val lineStart = text.lastIndexOf('\n', (minSel - 1).coerceAtLeast(0))
+    val blockStart = text.lastIndexOf('\n', (minSel - 1).coerceAtLeast(0))
         .let { if (it < 0) 0 else it + 1 }
-    val lineEnd = text.indexOf('\n', maxSel).let { if (it < 0) text.length else it }
-    val mLen = marker.length
-    val newLines = text.substring(lineStart, lineEnd).split('\n').joinToString("\n") { line ->
-        val t = line.trim()
-        if (t.isEmpty()) return@joinToString line
-        val isH = t.startsWith(marker) && t.endsWith(marker) && t.length > mLen
-        if (isH) {
-            var s = 0; while (s + mLen <= t.length && t.substring(s, s + mLen) == marker) s += mLen
-            var e = t.length; while (e - mLen >= s && t.substring(e - mLen, e) == marker) e -= mLen
-            t.substring(s, e).trim()
-        } else { "$marker $t $marker" }
+    val blockEnd = text.indexOf('\n', maxSel).let { if (it < 0) text.length else it }
+    val prefix = marker.repeat(level)
+
+    fun headingLevel(line: String): Int {
+        if (!line.startsWith(marker)) return 0
+        var n = 1
+        while (n < 3 && line.startsWith(marker.repeat(n + 1))) n++
+        return n
     }
-    val newText = text.substring(0, lineStart) + newLines + text.substring(lineEnd)
-    return Triple(newText, lineStart, lineStart + newLines.length)
+    fun stripHeading(line: String): String {
+        var t = line.trim()
+        while (t.startsWith(marker)) t = t.removePrefix(marker).trim()
+        while (t.endsWith(marker)) t = t.removeSuffix(marker).trim()
+        return t
+    }
+
+    val lines = text.substring(blockStart, blockEnd).split('\n')
+    val allAtLevel = lines.all { headingLevel(it) == level }
+    val newLines = lines.map { l ->
+        if (allAtLevel) stripHeading(l)
+        else {
+            val body = if (headingLevel(l) > 0) stripHeading(l) else l.trim()
+            if (body.isNotEmpty()) "$prefix $body $prefix" else "$prefix  $prefix"
+        }
+    }
+    val newBlock = newLines.joinToString("\n")
+    val newText = text.substring(0, blockStart) + newBlock + text.substring(blockEnd)
+    return Triple(newText, blockStart, blockStart + newBlock.length)
+}
+
+// Returns (newText, selStart, selEnd) or null if marker is empty.
+// Mirror of web's applyLineMarker(marker) (writhdeck-web/src/editor.js): toggles
+// `marker` at the start of every selected line (e.g. comment marker).
+fun applyLineMarkerResult(text: String, selStart: Int, selEnd: Int, marker: String): Triple<String, Int, Int>? {
+    if (marker.isEmpty()) return null
+    val minSel = minOf(selStart, selEnd)
+    val maxSel = maxOf(selStart, selEnd)
+    val blockStart = text.lastIndexOf('\n', (minSel - 1).coerceAtLeast(0))
+        .let { if (it < 0) 0 else it + 1 }
+    val blockEnd = text.indexOf('\n', maxSel).let { if (it < 0) text.length else it }
+    val lines = text.substring(blockStart, blockEnd).split('\n')
+    val allMarked = lines.all { it.startsWith(marker) }
+    val newLines = if (allMarked) lines.map { it.removePrefix(marker) } else lines.map { marker + it }
+    val newBlock = newLines.joinToString("\n")
+    val newText = text.substring(0, blockStart) + newBlock + text.substring(blockEnd)
+    return Triple(newText, blockStart, blockStart + newBlock.length)
+}
+
+// Returns (newText, selStart, selEnd) or null if marker is empty.
+// Mirror of web's applyInlineMarker(marker) (writhdeck-web/src/editor.js): wraps/unwraps
+// the selection with `marker...marker`, or inserts `marker+marker` and places the
+// cursor between them if there is no selection (e.g. bold/italic/underline/strike).
+fun applyInlineMarkerResult(text: String, selStart: Int, selEnd: Int, marker: String): Triple<String, Int, Int>? {
+    if (marker.isEmpty()) return null
+    val s = minOf(selStart, selEnd)
+    val e = maxOf(selStart, selEnd)
+    if (s == e) {
+        val newText = text.substring(0, s) + marker + marker + text.substring(s)
+        val pos = s + marker.length
+        return Triple(newText, pos, pos)
+    }
+    val sel = text.substring(s, e)
+    val isWrapped = sel.startsWith(marker) && sel.endsWith(marker) && sel.length > marker.length * 2
+    return if (isWrapped) {
+        val inner = sel.substring(marker.length, sel.length - marker.length)
+        val newText = text.substring(0, s) + inner + text.substring(e)
+        Triple(newText, s, s + inner.length)
+    } else {
+        val wrapped = marker + sel + marker
+        val newText = text.substring(0, s) + wrapped + text.substring(e)
+        Triple(newText, s, s + wrapped.length)
+    }
 }
 
 /** A parsed Tk key binding (e.g. "Control-s", "F11", "Control-S") — native Android key code
@@ -337,6 +443,9 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val keyGoto by vm.keyGoto.collectAsStateWithLifecycle()
     val keyClose by vm.keyClose.collectAsStateWithLifecycle()
     val keyToc by vm.keyToc.collectAsStateWithLifecycle()
+    val keyTypewriter by vm.keyTypewriter.collectAsStateWithLifecycle()
+    val keyLineNumbers by vm.keyLineNumbers.collectAsStateWithLifecycle()
+    val keyCmdMode by vm.keyCmdMode.collectAsStateWithLifecycle()
     val marginWidth by vm.marginWidth.collectAsStateWithLifecycle()
     val marginHeight by vm.marginHeight.collectAsStateWithLifecycle()
     val fontSize by vm.fontSize.collectAsStateWithLifecycle()
@@ -345,6 +454,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val blockCursor by vm.blockCursor.collectAsStateWithLifecycle()
     val lineSpacing by vm.lineSpacing.collectAsStateWithLifecycle()
     val hemingwayMode by vm.hemingwayMode.collectAsStateWithLifecycle()
+    val lineNumbersEnabled by vm.lineNumbersEnabled.collectAsStateWithLifecycle()
     val toc by vm.toc.collectAsStateWithLifecycle()
     val saveBinding = remember(keySave) { tkKeyToAndroid(keySave) }
     val findBinding = remember(keyFind) { tkKeyToAndroid(keyFind) }
@@ -352,6 +462,9 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val gotoBinding = remember(keyGoto) { tkKeyToAndroid(keyGoto) }
     val closeBinding = remember(keyClose) { tkKeyToAndroid(keyClose) }
     val tocBinding = remember(keyToc) { tkKeyToAndroid(keyToc) }
+    val typewriterBinding = remember(keyTypewriter) { tkKeyToAndroid(keyTypewriter) }
+    val lineNumbersBinding = remember(keyLineNumbers) { tkKeyToAndroid(keyLineNumbers) }
+    val cmdModeBinding = remember(keyCmdMode) { tkKeyToAndroid(keyCmdMode) }
 
     val timerActive by vm.timerActive.collectAsStateWithLifecycle()
     val timerRemaining by vm.timerRemaining.collectAsStateWithLifecycle()
@@ -399,6 +512,25 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val marginWidthPx  = remember(marginWidth,  density) { with(density) { marginWidth.dp.roundToPx() } }
     val marginHeightPx = remember(marginHeight, density) { with(density) { marginHeight.dp.roundToPx() } }
 
+    // Modal command mode (mirrors Tcl/Web "Echap"): toggled by `keyCmdMode` (default
+    // Escape). While active, the next key performs a one-letter action and exits.
+    var cmdMode by remember { mutableStateOf(false) }
+
+    var typewriterMode by remember { mutableStateOf(false) }
+    // Hemingway mode is a modifier of typewriter mode: it has no effect at all
+    // unless typewriter mode is also active (mirrors Tcl's
+    // `$::typewriter_mode && $::cfg_hemingway_mode` gating).
+    val hemingwayActive = typewriterMode && hemingwayMode
+    val effMarginWidthPx  = if (hemingwayActive) marginWidthPx * 2 else marginWidthPx
+    val effMarginHeightPx = if (hemingwayActive) marginHeightPx * 2 else marginHeightPx
+
+    // Line numbers gutter: rebuild the "1\n2\n...\nN" text only when the line count
+    // changes (mirrors web's `_lastLineCount` cache), scroll-synced via gutterRef.
+    val gutterRef = remember { mutableStateOf<android.widget.TextView?>(null) }
+    val lineCount = remember(content) { content.count { it == '\n' } + 1 }
+    val lineNumbersText = remember(lineCount) { (1..lineCount).joinToString("\n") }
+    val gutterPadX = remember(density) { with(density) { 4.dp.roundToPx() } }
+
     // Native EditText ref + state refs shared with factory closure
     val editorRef = remember { mutableStateOf<android.widget.EditText?>(null) }
     val ignoreTextChange = remember { booleanArrayOf(false) }
@@ -434,6 +566,18 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         }
     }
 
+    // Applies the (newText, selStart, selEnd) result of a markup helper
+    // (applyHeadingLevel/applyLineMarkerResult/applyInlineMarkerResult) to the editor.
+    fun applyEditResult(r: Triple<String, Int, Int>?) {
+        val et = editorRef.value ?: return
+        if (r == null) return
+        val (newText, ns, ne) = r
+        ignoreTextChange[0] = true
+        et.setText(newText); et.setSelection(ns, ne)
+        ignoreTextChange[0] = false
+        vm.updateContent(newText)
+    }
+
     DisposableEffect(Unit) { onDispose { vm.saveCursor(editorRef.value?.selectionStart ?: 0) } }
 
     if (distractionFree) BackHandler { distractionFree = false }
@@ -441,6 +585,19 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     if (dirty && fileWritable && !distractionFree) BackHandler { showSaveConfirm = true }
 
     val context = LocalContext.current
+
+    // Export as .txt/.md (mirrors web's Editor.exportDoc(fmt)): writes the current
+    // content to a new document chosen via the system "Save As" picker.
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri != null) {
+            scope.launch(Dispatchers.IO) {
+                context.contentResolver.openOutputStream(uri)?.use { it.writer().use { w -> w.write(content) } }
+            }
+        }
+    }
+    fun exportFileName(ext: String): String =
+        "${(currentFile?.name ?: "Untitled").substringBeforeLast('.')}.$ext"
+
     DisposableEffect(distractionFree) {
         var ctx = context
         while (ctx is ContextWrapper && ctx !is Activity) ctx = ctx.baseContext
@@ -474,6 +631,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     var showStats by remember { mutableStateOf(false) }
     var showWords by remember { mutableStateOf(false) }
     var showAnalyse by remember { mutableStateOf(false) }
+    var showFileInfo by remember { mutableStateOf(false) }
     var showGotoLine by remember { mutableStateOf(false) }
     var gotoLineValue by remember { mutableStateOf("") }
     var statsData by remember { mutableStateOf<List<StatEntry>>(emptyList()) }
@@ -490,6 +648,38 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                 matches.add(found until found + query.length); idx = found + 1
             }
             matches.toList()
+        }
+    }
+
+    fun doReplaceOne() {
+        if (searchMatches.isNotEmpty() && editorRef.value != null) {
+            val et = editorRef.value!!
+            val idx = findMatchIndex.coerceIn(0, searchMatches.lastIndex)
+            val range = searchMatches[idx]
+            val text = et.text.toString()
+            val s = range.first.coerceIn(0, text.length)
+            val e = (range.last + 1).coerceIn(0, text.length)
+            val newText = text.substring(0, s) + replaceText + text.substring(e)
+            ignoreTextChange[0] = true
+            et.setText(newText)
+            et.setSelection((s + replaceText.length).coerceAtMost(newText.length))
+            ignoreTextChange[0] = false
+            vm.updateContent(newText)
+        }
+    }
+
+    fun doReplaceAll() {
+        if (findQuery.length >= 2 && editorRef.value != null) {
+            val et = editorRef.value!!
+            val text = et.text.toString()
+            val newText = text.replace(findQuery, replaceText, ignoreCase = true)
+            if (newText != text) {
+                ignoreTextChange[0] = true
+                et.setText(newText)
+                et.setSelection(newText.length)
+                ignoreTextChange[0] = false
+                vm.updateContent(newText)
+            }
         }
     }
 
@@ -510,6 +700,15 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
             )
         }
         editorRef.value?.editableText?.let { applySyntaxSpansToEditable(it, spans) }
+    }
+
+    // Typewriter mode — re-dim paragraphs and re-centre on text changes / mode toggle.
+    // Pure cursor movement (no text change) is handled by FlingEditText.selectionChangeListener.
+    LaunchedEffect(typewriterMode, content, cmtColorInt) {
+        val editText = editorRef.value ?: return@LaunchedEffect
+        val editable = editText.editableText ?: return@LaunchedEffect
+        applyTypewriterDimming(editable, content, editText.selectionStart, typewriterMode, cmtColorInt)
+        if (typewriterMode) (editText as? FlingEditText)?.centerCurrentLine()
     }
 
     // Search highlighting + cursor navigation
@@ -563,43 +762,12 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                             Icon(Icons.Filled.MoreVert, contentDescription = "More options")
                         }
                         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                            // — Edit —
+                            // ⌨ Command mode (mirrors Web's top-of-menu entry: Esc / Alt+C)
                             DropdownMenuItem(
-                                text = { Text("Find", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; showFind = true },
-                                trailingIcon = { Text("⌘F", style = MaterialTheme.typography.labelSmall,
+                                text = { Text("Command mode", fontFamily = FontFamily.Monospace) },
+                                onClick = { showMenu = false; cmdMode = !cmdMode },
+                                trailingIcon = { Text("$keyCmdMode / Alt+C", style = MaterialTheme.typography.labelSmall,
                                     color = colorScheme.onSurfaceVariant) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Find & Replace", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; showFind = true; findReplace = true },
-                                trailingIcon = { Text("⌘H", style = MaterialTheme.typography.labelSmall,
-                                    color = colorScheme.onSurfaceVariant) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Goto line…", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; showGotoLine = true; gotoLineValue = "" },
-                                trailingIcon = { Text("⌘G", style = MaterialTheme.typography.labelSmall,
-                                    color = colorScheme.onSurfaceVariant) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Toggle heading", fontFamily = FontFamily.Monospace) },
-                                enabled = headingMarker.isNotEmpty(),
-                                onClick = {
-                                    val et = editorRef.value
-                                    if (et != null && headingMarker.isNotEmpty()) {
-                                        val r = applyHeadingResult(et.text.toString(),
-                                            et.selectionStart, et.selectionEnd, headingMarker)
-                                        if (r != null) {
-                                            val (newText, ns, ne) = r
-                                            ignoreTextChange[0] = true
-                                            et.setText(newText); et.setSelection(ns, ne)
-                                            ignoreTextChange[0] = false
-                                            vm.updateContent(newText)
-                                        }
-                                    }
-                                    showMenu = false
-                                }
                             )
                             HorizontalDivider()
                             // — View —
@@ -618,6 +786,18 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                                 }
                             )
                             DropdownMenuItem(
+                                text = { Text("Line numbers", fontFamily = FontFamily.Monospace) },
+                                onClick = { showMenu = false; vm.setLineNumbersEnabled(!lineNumbersEnabled) },
+                                trailingIcon = { Text(keyLineNumbers, style = MaterialTheme.typography.labelSmall,
+                                    color = colorScheme.onSurfaceVariant) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Typewriter mode", fontFamily = FontFamily.Monospace) },
+                                onClick = { showMenu = false; typewriterMode = !typewriterMode },
+                                trailingIcon = { Text(keyTypewriter, style = MaterialTheme.typography.labelSmall,
+                                    color = colorScheme.onSurfaceVariant) }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Distraction-free", fontFamily = FontFamily.Monospace) },
                                 onClick = { showMenu = false; distractionFree = true }
                             )
@@ -633,22 +813,163 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                                 }
                             )
                             HorizontalDivider()
-                            // — Analyse —
+                            // — Search —
+                            DropdownMenuItem(
+                                text = { Text("Find", fontFamily = FontFamily.Monospace) },
+                                onClick = { showMenu = false; showFind = true },
+                                trailingIcon = { Text("⌘F", style = MaterialTheme.typography.labelSmall,
+                                    color = colorScheme.onSurfaceVariant) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Find & Replace", fontFamily = FontFamily.Monospace) },
+                                onClick = { showMenu = false; showFind = true; findReplace = true },
+                                trailingIcon = { Text("⌘H", style = MaterialTheme.typography.labelSmall,
+                                    color = colorScheme.onSurfaceVariant) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Goto line…", fontFamily = FontFamily.Monospace) },
+                                onClick = { showMenu = false; showGotoLine = true; gotoLineValue = "" },
+                                trailingIcon = { Text("⌘G", style = MaterialTheme.typography.labelSmall,
+                                    color = colorScheme.onSurfaceVariant) }
+                            )
+                            HorizontalDivider()
+                            // — Format — (mirrors Web's dynamic Format labels, openMenu() in app.js)
+                            DropdownMenuItem(
+                                text = { Text(
+                                    if (headingMarker.isNotEmpty()) "$headingMarker H1 $headingMarker" else "H1",
+                                    fontFamily = FontFamily.Monospace
+                                ) },
+                                enabled = headingMarker.isNotEmpty(),
+                                onClick = {
+                                    val et = editorRef.value
+                                    if (et != null) applyEditResult(applyHeadingLevel(
+                                        et.text.toString(), et.selectionStart, et.selectionEnd, headingMarker, 1))
+                                    showMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(
+                                    if (headingMarker.isNotEmpty())
+                                        "${headingMarker.repeat(2)} H2 ${headingMarker.repeat(2)}" else "H2",
+                                    fontFamily = FontFamily.Monospace
+                                ) },
+                                enabled = headingMarker.isNotEmpty(),
+                                onClick = {
+                                    val et = editorRef.value
+                                    if (et != null) applyEditResult(applyHeadingLevel(
+                                        et.text.toString(), et.selectionStart, et.selectionEnd, headingMarker, 2))
+                                    showMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(
+                                    if (headingMarker.isNotEmpty())
+                                        "${headingMarker.repeat(3)} H3 ${headingMarker.repeat(3)}" else "H3",
+                                    fontFamily = FontFamily.Monospace
+                                ) },
+                                enabled = headingMarker.isNotEmpty(),
+                                onClick = {
+                                    val et = editorRef.value
+                                    if (et != null) applyEditResult(applyHeadingLevel(
+                                        et.text.toString(), et.selectionStart, et.selectionEnd, headingMarker, 3))
+                                    showMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(
+                                    if (commentMarker.isNotEmpty()) "$commentMarker Comment" else "Comment",
+                                    fontFamily = FontFamily.Monospace
+                                ) },
+                                enabled = commentMarker.isNotEmpty(),
+                                onClick = {
+                                    val et = editorRef.value
+                                    if (et != null) applyEditResult(applyLineMarkerResult(
+                                        et.text.toString(), et.selectionStart, et.selectionEnd, commentMarker))
+                                    showMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(
+                                    if (boldMarker.isNotEmpty()) "$boldMarker Bold" else "Bold",
+                                    fontFamily = FontFamily.Monospace
+                                ) },
+                                enabled = boldMarker.isNotEmpty(),
+                                onClick = {
+                                    val et = editorRef.value
+                                    if (et != null) applyEditResult(applyInlineMarkerResult(
+                                        et.text.toString(), et.selectionStart, et.selectionEnd, boldMarker))
+                                    showMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(
+                                    if (italicMarker.isNotEmpty()) "$italicMarker Italic" else "Italic",
+                                    fontFamily = FontFamily.Monospace
+                                ) },
+                                enabled = italicMarker.isNotEmpty(),
+                                onClick = {
+                                    val et = editorRef.value
+                                    if (et != null) applyEditResult(applyInlineMarkerResult(
+                                        et.text.toString(), et.selectionStart, et.selectionEnd, italicMarker))
+                                    showMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(
+                                    if (underlineMarker.isNotEmpty()) "$underlineMarker Underline" else "Underline",
+                                    fontFamily = FontFamily.Monospace
+                                ) },
+                                enabled = underlineMarker.isNotEmpty(),
+                                onClick = {
+                                    val et = editorRef.value
+                                    if (et != null) applyEditResult(applyInlineMarkerResult(
+                                        et.text.toString(), et.selectionStart, et.selectionEnd, underlineMarker))
+                                    showMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(
+                                    if (strikethroughMarker.isNotEmpty()) "$strikethroughMarker Strike" else "Strike",
+                                    fontFamily = FontFamily.Monospace
+                                ) },
+                                enabled = strikethroughMarker.isNotEmpty(),
+                                onClick = {
+                                    val et = editorRef.value
+                                    if (et != null) applyEditResult(applyInlineMarkerResult(
+                                        et.text.toString(), et.selectionStart, et.selectionEnd, strikethroughMarker))
+                                    showMenu = false
+                                }
+                            )
+                            HorizontalDivider()
+                            // — Document —
                             DropdownMenuItem(
                                 text = { Text("Writing stats", fontFamily = FontFamily.Monospace) },
                                 onClick = { showMenu = false; scope.launch { statsData = vm.getDailyStats(); showStats = true } }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Word frequency", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; scope.launch { wordsData = vm.getWordOccurrences(); showWords = true } }
                             )
                             DropdownMenuItem(
                                 text = { Text("Structure analysis", fontFamily = FontFamily.Monospace) },
                                 enabled = toc.isNotEmpty(),
                                 onClick = { showMenu = false; analyseData = computeSectionAnalysis(toc, content); showAnalyse = true }
                             )
+                            DropdownMenuItem(
+                                text = { Text("Word frequency", fontFamily = FontFamily.Monospace) },
+                                onClick = { showMenu = false; scope.launch { wordsData = vm.getWordOccurrences(); showWords = true } }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("File info", fontFamily = FontFamily.Monospace) },
+                                enabled = currentFile != null,
+                                onClick = { showMenu = false; showFileInfo = true }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Export as .txt", fontFamily = FontFamily.Monospace) },
+                                onClick = { showMenu = false; exportLauncher.launch(exportFileName("txt")) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Export as .md", fontFamily = FontFamily.Monospace) },
+                                onClick = { showMenu = false; exportLauncher.launch(exportFileName("md")) }
+                            )
                             HorizontalDivider()
-                            // — Timer —
+                            // — App —
                             val timerLabel = when {
                                 !timerActive && timerLastTick == 0L -> "Start timer"
                                 timerActive -> "Pause  ${formatTimer(timerRemaining, true).trim()}"
@@ -672,8 +993,12 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                                     onClick = { showMenu = false; vm.timerReset() }
                                 )
                             }
-                            HorizontalDivider()
-                            // — App —
+                            DropdownMenuItem(
+                                text = { Text("Block cursor", fontFamily = FontFamily.Monospace) },
+                                onClick = { showMenu = false; vm.setBlockCursor(!blockCursor) },
+                                trailingIcon = { Text(if (blockCursor) "on" else "off", style = MaterialTheme.typography.labelSmall,
+                                    color = colorScheme.onSurfaceVariant) }
+                            )
                             DropdownMenuItem(
                                 text = { Text("Settings", fontFamily = FontFamily.Monospace) },
                                 onClick = { showMenu = false; onNavigateSettings() }
@@ -685,27 +1010,71 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
-            if (!distractionFree) Surface(tonalElevation = 2.dp) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-                        .navigationBarsPadding(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(statusBar.left, fontFamily = FontFamily.Monospace,
-                         style = MaterialTheme.typography.bodySmall, color = colorScheme.onSurfaceVariant)
-                    if (statusBar.center.isNotEmpty()) {
-                        Text(statusBar.center, fontFamily = FontFamily.Monospace,
-                             style = MaterialTheme.typography.bodySmall, color = colorScheme.onSurfaceVariant)
+            if (!distractionFree && !hemingwayActive) Surface(
+                tonalElevation = 2.dp,
+                color = if (cmdMode) colorScheme.primaryContainer else colorScheme.surface
+            ) {
+                if (cmdMode) {
+                    // Command-mode hint bar (mirrors Tcl's ed_bar_center while gui_cmd_mode is on).
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                            .navigationBarsPadding()
+                            .horizontalScroll(rememberScrollState()),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "CMD  f:find r:replace g:goto n:line# d:dark o:toc w:typewriter " +
+                                "t:timer s:stats a:analyse m:menu c:settings q:close   ($keyCmdMode=cancel)",
+                            fontFamily = FontFamily.Monospace, maxLines = 1,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onPrimaryContainer
+                        )
                     }
-                    Text(statusBar.right, fontFamily = FontFamily.Monospace,
-                         style = MaterialTheme.typography.bodySmall,
-                         color = if (timerActive) colorScheme.primary else colorScheme.onSurfaceVariant)
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                            .navigationBarsPadding(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(statusBar.left, fontFamily = FontFamily.Monospace,
+                             style = MaterialTheme.typography.bodySmall, color = colorScheme.onSurfaceVariant)
+                        if (statusBar.center.isNotEmpty()) {
+                            Text(statusBar.center, fontFamily = FontFamily.Monospace,
+                                 style = MaterialTheme.typography.bodySmall, color = colorScheme.onSurfaceVariant)
+                        }
+                        Text(statusBar.right, fontFamily = FontFamily.Monospace,
+                             style = MaterialTheme.typography.bodySmall,
+                             color = if (timerActive) colorScheme.primary else colorScheme.onSurfaceVariant)
+                    }
                 }
             }
         }
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().background(editorBg).padding(padding)) {
+
+            Row(modifier = Modifier.fillMaxSize()) {
+            if (lineNumbersEnabled) {
+                AndroidView(
+                    factory = { ctx ->
+                        android.widget.TextView(ctx).apply {
+                            gravity = Gravity.END or Gravity.TOP
+                            isFocusable = false
+                            isClickable = false
+                            setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        }.also { gutterRef.value = it }
+                    },
+                    update = { tv ->
+                        tv.text = lineNumbersText
+                        tv.setTextColor(cmtColorInt)
+                        tv.typeface = Typeface.create(fontFamily, if (fontBold) Typeface.BOLD else Typeface.NORMAL)
+                        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize.toFloat())
+                        tv.setLineSpacing(0f, lineSpacing)
+                        tv.setPadding(gutterPadX, effMarginHeightPx, gutterPadX, effMarginHeightPx)
+                    },
+                    modifier = Modifier.fillMaxHeight().wrapContentWidth()
+                )
+            }
 
             AndroidView(
                 factory = { ctx ->
@@ -734,6 +1103,9 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                         })
 
                         setOnKeyListener { _, keyCode, event -> keyHandlerRef[0](keyCode, event) }
+
+                        // Keep the line-numbers gutter's scroll position in sync with the editor.
+                        setOnScrollChangeListener { _, _, scrollY, _, _ -> gutterRef.value?.scrollTo(0, scrollY) }
                     }.also { editorRef.value = it }
                 },
                 update = { editText ->
@@ -748,7 +1120,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     }
                     // Guard all layout-invalidating calls — avoids scroll jank from timer recompositions.
                     val newStyle = EditorStyle(editorFgInt, fontSize.toFloat(), lineSpacing,
-                                               marginWidthPx, marginHeightPx, fileWritable, hemingwayMode,
+                                               effMarginWidthPx, effMarginHeightPx, fileWritable, hemingwayActive,
                                                fontFamily, fontBold, blockCursor)
                     if (lastStyle[0] != newStyle) {
                         editText.setTextColor(newStyle.fgColor)
@@ -783,25 +1155,113 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                         if (event.action != AKeyEvent.ACTION_DOWN) return@handler false
                         val ctrl = event.isCtrlPressed
                         when {
-                            hemingwayMode && (keyCode == AKeyEvent.KEYCODE_DEL ||
-                                keyCode == AKeyEvent.KEYCODE_FORWARD_DEL) -> true
+                            // Modal command mode (mirrors Tcl/Web "Echap"): the next key performs
+                            // a one-letter action, then cmd mode exits — every key is swallowed.
+                            cmdMode -> {
+                                cmdMode = false
+                                when (event.unicodeChar.toChar().lowercaseChar()) {
+                                    'f' -> { showFind = true; findReplace = false }
+                                    'r' -> { showFind = true; findReplace = true }
+                                    'g' -> { showGotoLine = true; gotoLineValue = "" }
+                                    'n' -> vm.setLineNumbersEnabled(!lineNumbersEnabled)
+                                    'd' -> vm.setDarkModePreference(
+                                        when (darkPref) { "auto" -> "yes"; "yes" -> "no"; else -> "auto" }
+                                    )
+                                    'o' -> if (toc.isNotEmpty()) showToc = true
+                                    'w' -> typewriterMode = !typewriterMode
+                                    't' -> when {
+                                        !timerActive && timerLastTick == 0L -> vm.timerStart()
+                                        timerActive -> vm.timerPause()
+                                        else -> vm.timerResume()
+                                    }
+                                    's' -> scope.launch { statsData = vm.getDailyStats(); showStats = true }
+                                    'a' -> if (toc.isNotEmpty()) {
+                                        analyseData = computeSectionAnalysis(toc, content); showAnalyse = true
+                                    }
+                                    'm' -> showMenu = true
+                                    'c' -> onNavigateSettings()
+                                    'q' -> requestClose()
+                                    else -> {}
+                                }
+                                true
+                            }
+                            // Hemingway restrictions only apply while typewriter mode is active
+                            // (mirrors Tcl: `$::typewriter_mode && $::cfg_hemingway_mode`).
+                            hemingwayActive && (keyCode == AKeyEvent.KEYCODE_DEL ||
+                                keyCode == AKeyEvent.KEYCODE_FORWARD_DEL ||
+                                keyCode == AKeyEvent.KEYCODE_DPAD_LEFT ||
+                                keyCode == AKeyEvent.KEYCODE_DPAD_RIGHT ||
+                                keyCode == AKeyEvent.KEYCODE_DPAD_UP ||
+                                keyCode == AKeyEvent.KEYCODE_DPAD_DOWN) -> true
+                            hemingwayActive && ctrl && keyCode == AKeyEvent.KEYCODE_Z -> true
+                            // Ctrl+T — toggle typewriter mode (mirrors Tcl Ctrl+T)
+                            typewriterBinding?.matches(keyCode, event) == true -> {
+                                typewriterMode = !typewriterMode; true
+                            }
+                            // Ctrl+L — toggle line numbers gutter (mirrors Tcl/web Ctrl+L)
+                            lineNumbersBinding?.matches(keyCode, event) == true -> {
+                                vm.setLineNumbersEnabled(!lineNumbersEnabled); true
+                            }
                             tocBinding != null && tocBinding.matches(keyCode, event) && toc.isNotEmpty() -> {
                                 showToc = true; true
+                            }
+                            // Shift+Ctrl+F11 — toggle pinned TOC (mirrors Tcl key_toc_pinned)
+                            ctrl && event.isShiftPressed && keyCode == AKeyEvent.KEYCODE_F11 -> {
+                                tocPinned = !tocPinned
+                                if (tocPinned) showToc = true
+                                true
                             }
                             saveBinding?.matches(keyCode, event) == true -> { if (fileWritable) vm.saveFile(); true }
                             findBinding?.matches(keyCode, event) == true -> { showFind = true; true }
                             replaceBinding?.matches(keyCode, event) == true -> { showFind = true; findReplace = true; true }
                             gotoBinding?.matches(keyCode, event) == true -> { showGotoLine = true; true }
                             closeBinding?.matches(keyCode, event) == true -> { requestClose(); true }
+                            // Ctrl+D — cycle dark mode preference (auto -> yes -> no -> auto)
+                            ctrl && keyCode == AKeyEvent.KEYCODE_D -> {
+                                vm.setDarkModePreference(when (darkPref) { "auto" -> "yes"; "yes" -> "no"; else -> "auto" })
+                                true
+                            }
+                            // Alt+T — timer start/pause/resume (mirrors Tcl/web Alt+T)
+                            event.isAltPressed && keyCode == AKeyEvent.KEYCODE_T -> {
+                                when {
+                                    !timerActive && timerLastTick == 0L -> vm.timerStart()
+                                    timerActive -> vm.timerPause()
+                                    else -> vm.timerResume()
+                                }
+                                true
+                            }
                             !ctrl && keyCode == AKeyEvent.KEYCODE_ESCAPE && showFind -> {
                                 showFind = false; findQuery = ""; findReplace = false; true
                             }
+                            // Escape — close distraction-free mode
+                            !ctrl && keyCode == AKeyEvent.KEYCODE_ESCAPE && distractionFree -> {
+                                distractionFree = false; true
+                            }
+                            // Activate modal command mode (mirrors Tcl/Web "Echap")
+                            cmdModeBinding?.matches(keyCode, event) == true -> { cmdMode = true; true }
+                            // Alt+C — hardcoded alternative to enter modal command mode (mirrors
+                            // Web, where Alt+C is a fixed alternative to Escape). Useful on
+                            // keyboards without an Escape key. Checked last: if a `key_*` binding
+                            // above is also configured to Alt-C, that action wins for this combo —
+                            // same first-match precedence as any two `key_*` bindings that collide.
+                            event.isAltPressed && keyCode == AKeyEvent.KEYCODE_C -> { cmdMode = true; true }
                             else -> false
                         }
                     }
+
+                    // Typewriter mode: re-dim + re-centre on cursor movement alone (no text change).
+                    editText.selectionChangeListener = {
+                        if (typewriterMode) {
+                            editText.editableText?.let {
+                                applyTypewriterDimming(it, content, editText.selectionStart, true, cmtColorInt)
+                            }
+                            editText.centerCurrentLine()
+                        }
+                    }
                 },
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize().weight(1f)
             )
+            }
 
             if (distractionFree) {
                 IconButton(
@@ -891,44 +1351,20 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                                         .focusRequester(replaceFocusRequester)
                                         .onKeyEvent { event ->
                                             if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
-                                            if (event.key == Key.Escape) { showFind = false; findReplace = false; findQuery = ""; true }
-                                            else false
+                                            when {
+                                                event.key == Key.Escape -> { showFind = false; findReplace = false; findQuery = ""; true }
+                                                event.key == Key.Enter && event.isCtrlPressed -> { doReplaceAll(); true }
+                                                event.key == Key.Enter -> { doReplaceOne(); true }
+                                                else -> false
+                                            }
                                         }
                                 )
                                 TextButton(
-                                    onClick = {
-                                        if (searchMatches.isNotEmpty() && editorRef.value != null) {
-                                            val et = editorRef.value!!
-                                            val idx = findMatchIndex.coerceIn(0, searchMatches.lastIndex)
-                                            val range = searchMatches[idx]
-                                            val text = et.text.toString()
-                                            val s = range.first.coerceIn(0, text.length)
-                                            val e = (range.last + 1).coerceIn(0, text.length)
-                                            val newText = text.substring(0, s) + replaceText + text.substring(e)
-                                            ignoreTextChange[0] = true
-                                            et.setText(newText)
-                                            et.setSelection((s + replaceText.length).coerceAtMost(newText.length))
-                                            ignoreTextChange[0] = false
-                                            vm.updateContent(newText)
-                                        }
-                                    },
+                                    onClick = { doReplaceOne() },
                                     enabled = searchMatches.isNotEmpty()
                                 ) { Text("Replace", style = MaterialTheme.typography.bodySmall) }
                                 TextButton(
-                                    onClick = {
-                                        if (findQuery.length >= 2 && editorRef.value != null) {
-                                            val et = editorRef.value!!
-                                            val text = et.text.toString()
-                                            val newText = text.replace(findQuery, replaceText, ignoreCase = true)
-                                            if (newText != text) {
-                                                ignoreTextChange[0] = true
-                                                et.setText(newText)
-                                                et.setSelection(newText.length)
-                                                ignoreTextChange[0] = false
-                                                vm.updateContent(newText)
-                                            }
-                                        }
-                                    },
+                                    onClick = { doReplaceAll() },
                                     enabled = findQuery.length >= 2
                                 ) { Text("All", style = MaterialTheme.typography.bodySmall) }
                             }
@@ -1041,6 +1477,46 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                 }
             },
             confirmButton = { TextButton(onClick = { showStats = false }) { Text("Close") } }
+        )
+    }
+
+    if (showFileInfo && currentFile != null) {
+        val entry = currentFile!!
+        val f = File(entry.path)
+        val sizeStr = when {
+            f.length() < 1024L -> "${f.length()} B"
+            f.length() < 1024L * 1024 -> "${"%.1f".format(f.length() / 1024.0)} KB"
+            else -> "${"%.1f".format(f.length() / (1024.0 * 1024))} MB"
+        }
+        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+            .format(Date(f.lastModified()))
+        AlertDialog(
+            onDismissRequest = { showFileInfo = false },
+            title = {
+                Text(
+                    entry.name,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Path", style = MaterialTheme.typography.labelSmall,
+                         color = colorScheme.primary)
+                    Text(entry.path, fontFamily = FontFamily.Monospace,
+                         style = MaterialTheme.typography.bodySmall)
+                    HorizontalDivider()
+                    Text("Size: $sizeStr", style = MaterialTheme.typography.bodyMedium)
+                    Text("Modified: $dateStr", style = MaterialTheme.typography.bodyMedium)
+                    Text("Words: $wordCount", style = MaterialTheme.typography.bodyMedium)
+                    Text("Characters: ${content.length}", style = MaterialTheme.typography.bodyMedium)
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showFileInfo = false }) { Text("Close") }
+            }
         )
     }
 
