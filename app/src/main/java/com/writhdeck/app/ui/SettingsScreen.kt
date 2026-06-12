@@ -271,6 +271,10 @@ private fun TimerTab(s: SettingsData, onChange: (SettingsData) -> Unit) {
 private fun MiscTab(s: SettingsData, onEditIni: () -> Unit, onChange: (SettingsData) -> Unit) {
     SwitchSettingRow("Hemingway mode", s.hemingwayMode) { onChange(s.copy(hemingwayMode = it)) }
 
+    SettingsSection("Browser")
+    StringSettingRow("File filter", s.browserFilter) { onChange(s.copy(browserFilter = it)) }
+    SwitchSettingRow("Show all files (ignore filter)", s.browserShowAll) { onChange(s.copy(browserShowAll = it)) }
+
     SettingsSection("Autosave")
     SwitchSettingRow("Enabled", s.autosaveEnabled) { onChange(s.copy(autosaveEnabled = it)) }
     IntSettingRow("Interval (min)", s.autosaveInterval, 1, 60,

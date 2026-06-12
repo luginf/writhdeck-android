@@ -16,6 +16,33 @@ val EDITOR_FONTS = listOf(
     EditorFont("Casual", "casual")
 )
 
+/** Converts a Tcl `string match`-style glob (`*`, `?`, `[...]`) to a case-insensitive
+ *  whole-string [Regex]. Used by [AppConfig.matchesBrowserFilter]. */
+private fun globToRegex(pattern: String): Regex {
+    val sb = StringBuilder()
+    var i = 0
+    while (i < pattern.length) {
+        val c = pattern[i]
+        when (c) {
+            '*' -> sb.append(".*")
+            '?' -> sb.append('.')
+            '[' -> {
+                val close = pattern.indexOf(']', i + 1)
+                if (close < 0) {
+                    sb.append("\\[")
+                } else {
+                    sb.append('[').append(pattern.substring(i + 1, close)).append(']')
+                    i = close
+                }
+            }
+            '.', '+', '^', '$', '(', ')', '{', '}', '|', '\\' -> sb.append('\\').append(c)
+            else -> sb.append(c)
+        }
+        i++
+    }
+    return Regex("^$sb$", RegexOption.IGNORE_CASE)
+}
+
 data class ThemeColors(
     val bg: String = "#1a1a1a",
     val fg: String = "#e8e8e8",
@@ -65,8 +92,21 @@ data class AppConfig(
     val statusRight: String = "timer",
     val hemingwayMode: Boolean = false,
     val lineNumbers: Boolean = false,
-    val lineSpacing: Float = 1.5f
+    val lineSpacing: Float = 1.5f,
+    val browserFilter: String = "*.txt *.t2t *.md *.ini",
+    val browserShowAll: Boolean = false
 ) {
+    /** True if [filename] passes [browserFilter] (or [browserShowAll] bypasses it).
+     *  Mirrors the Tcl desktop's `list-docs` filtering: an empty filter or
+     *  browser_show_all=yes shows everything; otherwise glob-match (case-insensitive,
+     *  `*`/`?`/`[...]`) against each space-separated pattern. */
+    fun matchesBrowserFilter(filename: String): Boolean {
+        if (browserShowAll) return true
+        val patterns = browserFilter.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (patterns.isEmpty()) return true
+        return patterns.any { globToRegex(it).matches(filename) }
+    }
+
     fun schemeColors(): SchemeColors =
         customSchemes[scheme] ?: BUILTIN_SCHEMES[scheme] ?: BUILTIN_SCHEMES["default"]!!
 
@@ -182,7 +222,10 @@ object IniParser {
             statusRight      = str("status_right",  "timer"),
             hemingwayMode    = bool("hemingway_mode", false),
             lineNumbers      = bool("line_numbers", false),
-            lineSpacing      = keys["line_spacing"]?.toFloatOrNull()?.coerceIn(0.8f, 3.0f) ?: 1.5f
+            lineSpacing      = keys["line_spacing"]?.toFloatOrNull()?.coerceIn(0.8f, 3.0f) ?: 1.5f,
+            // Not via str(): an empty filter is a valid "show all" state, distinct from default
+            browserFilter    = keys["browser_filter"] ?: "*.txt *.t2t *.md *.ini",
+            browserShowAll   = bool("browser_show_all", false)
         )
     }
 
@@ -202,6 +245,10 @@ object IniParser {
             appendLine("hemingway_mode = ${bool(config.hemingwayMode)}")
             appendLine("line_numbers = ${bool(config.lineNumbers)}")
             appendLine("line_spacing = ${config.lineSpacing}")
+            appendLine("% browser_filter: space-separated glob patterns (* ? [...]) for the browser file list")
+            appendLine("browser_filter = ${config.browserFilter}")
+            appendLine("% browser_show_all: bypass browser_filter and show all files")
+            appendLine("browser_show_all = ${bool(config.browserShowAll)}")
             appendLine()
             appendLine("= status_bar =")
             appendLine("status_left = ${config.statusLeft}")

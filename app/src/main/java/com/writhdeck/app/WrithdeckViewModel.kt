@@ -70,7 +70,9 @@ data class SettingsData(
     val statusCenter: String = "words",
     val statusRight: String = "timer",
     val hemingwayMode: Boolean = false,
-    val lineSpacing: Float = 1.5f
+    val lineSpacing: Float = 1.5f,
+    val browserFilter: String = "*.txt *.t2t *.md *.ini",
+    val browserShowAll: Boolean = false
 )
 
 class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
@@ -411,7 +413,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             docsDir.mkdirs()
             val files = docsDir
-                .listFiles { f -> f.isFile && (f.extension == "txt" || f.extension == "md" || f.extension == "ini") }
+                .listFiles { f -> f.isFile && config.matchesBrowserFilter(f.name) }
                 ?.sortedByDescending { it.lastModified() }
                 ?.map { DocEntry(it.name, it.absolutePath) }
                 ?: emptyList()
@@ -955,7 +957,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         statusCenter     = config.statusCenter,
         statusRight      = config.statusRight,
         hemingwayMode    = config.hemingwayMode,
-        lineSpacing      = config.lineSpacing
+        lineSpacing      = config.lineSpacing,
+        browserFilter    = config.browserFilter,
+        browserShowAll   = config.browserShowAll
     )
 
     fun applySettings(s: SettingsData) {
@@ -986,7 +990,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             statusCenter     = s.statusCenter,
             statusRight      = s.statusRight,
             hemingwayMode    = s.hemingwayMode,
-            lineSpacing      = s.lineSpacing
+            lineSpacing      = s.lineSpacing,
+            browserFilter    = s.browserFilter,
+            browserShowAll   = s.browserShowAll
         )
         applyConfig()
         val activeProfile = config.activeProfile
@@ -1020,7 +1026,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 "status_center"     to s.statusCenter,
                 "status_right"      to s.statusRight,
                 "hemingway_mode"    to b(s.hemingwayMode),
-                "line_spacing"      to s.lineSpacing.toString()
+                "line_spacing"      to s.lineSpacing.toString(),
+                "browser_filter"    to s.browserFilter,
+                "browser_show_all"  to b(s.browserShowAll)
             )
             text = IniParser.patchProfileKey(text, activeProfile, "scheme", s.scheme)
             // Ensure all built-in scheme sections are present (add missing ones)
