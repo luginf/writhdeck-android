@@ -264,7 +264,8 @@ object IniParser {
             appendLine()
             appendLine("= misc =")
             appendLine("android_dark_mode = ${config.androidDarkMode}")
-            if (config.docsCustomDir.isNotEmpty()) appendLine("docs_dir = ${config.docsCustomDir}")
+            appendLine("% docs_dir: optional absolute path to a custom documents folder; empty = default")
+            appendLine("docs_dir = ${config.docsCustomDir}")
             appendLine()
             appendLine("= keys =")
             appendLine("% Use Tk key names: Control-s, Alt-Return, F11, etc.")
@@ -306,8 +307,32 @@ object IniParser {
     fun patchKeys(text: String, vararg pairs: Pair<String, String>): String {
         val toSet = pairs.toMap().toMutableMap()
         val found = mutableSetOf<String>()
+        val lines = text.lines()
+
+        // Missing global keys must be inserted before the first `= profile: ... =` /
+        // `= scheme: ... =` section — appending at the very end would land inside the
+        // last scheme section and get silently parsed away as a scheme color key.
+        var boundaryIdx = lines.size
+        for ((idx, raw) in lines.withIndex()) {
+            val trimmed = raw.trim()
+            if (trimmed.startsWith("=") && trimmed.endsWith("=") && trimmed.length > 2) {
+                val title = trimmed.trim('=').trim()
+                if (title.startsWith("profile:") || title.startsWith("scheme:")) {
+                    boundaryIdx = idx
+                    break
+                }
+            }
+        }
+
         val result = StringBuilder()
-        for (raw in text.lines()) {
+        for ((idx, raw) in lines.withIndex()) {
+            if (idx == boundaryIdx) {
+                val missing = toSet.keys - found
+                if (missing.isNotEmpty()) {
+                    for (k in missing) result.appendLine("$k = ${toSet[k]}")
+                    result.appendLine()
+                }
+            }
             val line = raw.trim()
             val eq = line.indexOf('=')
             if (eq > 0 && !line.startsWith("#") && !line.startsWith("%")
@@ -321,10 +346,12 @@ object IniParser {
             }
             result.appendLine(raw)
         }
-        val missing = toSet.keys - found
-        if (missing.isNotEmpty()) {
-            result.appendLine()
-            for (k in missing) result.appendLine("$k = ${toSet[k]}")
+        if (boundaryIdx == lines.size) {
+            val missing = toSet.keys - found
+            if (missing.isNotEmpty()) {
+                result.appendLine()
+                for (k in missing) result.appendLine("$k = ${toSet[k]}")
+            }
         }
         return result.toString().trimEnd() + "\n"
     }

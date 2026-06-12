@@ -72,7 +72,8 @@ data class SettingsData(
     val hemingwayMode: Boolean = false,
     val lineSpacing: Float = 1.5f,
     val browserFilter: String = "*.txt *.t2t *.md *.ini",
-    val browserShowAll: Boolean = false
+    val browserShowAll: Boolean = false,
+    val docsCustomDir: String = ""
 )
 
 class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
@@ -85,8 +86,19 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     private val _storagePermissionGranted = MutableStateFlow(checkStoragePermission())
     val storagePermissionGranted = _storagePermissionGranted.asStateFlow()
 
-    private val docsDir: File get() =
+    // Fixed location for writhdeck.ini, .writhdeck.json and autosave files —
+    // independent of docsCustomDir to avoid a bootstrapping problem (the INI
+    // can't be loaded from a directory whose path is itself stored in that INI).
+    private val configDir: File get() =
         if (_storagePermissionGranted.value) externalDocsDir else internalDocsDir
+
+    // Configurable documents folder (Settings > Misc > Documents folder). Falls back to
+    // configDir when unset or when storage permission isn't granted. Mirrors the Tcl
+    // desktop's DOCS_DIR vs DOCS_DIR_DEFAULT split.
+    private val docsDir: File get() {
+        val custom = config.docsCustomDir.trim()
+        return if (custom.isNotEmpty() && _storagePermissionGranted.value) File(custom) else configDir
+    }
 
     private var config = AppConfig()
     private var appState = AppState()
@@ -237,7 +249,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun initApp() {
-        val dd = docsDir.also { it.mkdirs() }
+        val dd = configDir.also { it.mkdirs() }
         stateFile = File(dd, ".writhdeck.json")
 
         config = withContext(Dispatchers.IO) {
@@ -378,7 +390,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
         val text = "$name\n$ts\n\n-------------------------\n$content"
         withContext(Dispatchers.IO) {
-            try { File(docsDir, "autosave_ws0$ws.txt").writeText(text) } catch (_: Exception) {}
+            try { File(configDir, "autosave_ws0$ws.txt").writeText(text) } catch (_: Exception) {}
         }
     }
 
@@ -412,11 +424,14 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshDocs() {
         viewModelScope.launch(Dispatchers.IO) {
             docsDir.mkdirs()
-            val files = docsDir
-                .listFiles { f -> f.isFile && config.matchesBrowserFilter(f.name) }
-                ?.sortedByDescending { it.lastModified() }
-                ?.map { DocEntry(it.name, it.absolutePath) }
-                ?: emptyList()
+            // If a custom docs folder is set, also list configDir (where writhdeck.ini and
+            // .writhdeck.json live) so those files don't disappear from the browser —
+            // mirrors the Tcl desktop's DOCS_DIR/DOCS_DIR_DEFAULT dual-listing.
+            val dirs = if (docsDir.absolutePath != configDir.absolutePath) listOf(docsDir, configDir) else listOf(docsDir)
+            val files = dirs
+                .flatMap { dir -> dir.listFiles { f -> f.isFile && config.matchesBrowserFilter(f.name) }?.toList() ?: emptyList() }
+                .sortedByDescending { it.lastModified() }
+                .map { DocEntry(it.name, it.absolutePath) }
             _docs.value = files
         }
     }
@@ -433,7 +448,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _darkModePreference.value = pref
         _themeColors.value = config.themeColors(resolveUseDark())
         viewModelScope.launch(Dispatchers.IO) {
-            val iniFile = File(docsDir, "writhdeck.ini")
+            val iniFile = File(configDir, "writhdeck.ini")
             if (iniFile.exists()) {
                 iniFile.writeText(IniParser.patchKeys(iniFile.readText(), "android_dark_mode" to pref))
             } else {
@@ -446,7 +461,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         config = config.copy(lineNumbers = enabled)
         _lineNumbersEnabled.value = enabled
         viewModelScope.launch(Dispatchers.IO) {
-            val iniFile = File(docsDir, "writhdeck.ini")
+            val iniFile = File(configDir, "writhdeck.ini")
             if (iniFile.exists()) {
                 iniFile.writeText(IniParser.patchKeys(iniFile.readText(), "line_numbers" to if (enabled) "yes" else "no"))
             } else {
@@ -459,7 +474,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         config = config.copy(blockCursor = enabled)
         _blockCursor.value = enabled
         viewModelScope.launch(Dispatchers.IO) {
-            val iniFile = File(docsDir, "writhdeck.ini")
+            val iniFile = File(configDir, "writhdeck.ini")
             if (iniFile.exists()) {
                 iniFile.writeText(IniParser.patchKeys(iniFile.readText(), "block_cursor" to if (enabled) "yes" else "no"))
             } else {
@@ -505,8 +520,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openIniFile() {
         viewModelScope.launch {
-            val iniFile = File(docsDir, "writhdeck.ini")
-            docsDir.mkdirs()
+            val iniFile = File(configDir, "writhdeck.ini")
+            configDir.mkdirs()
             val text = withContext(Dispatchers.IO) {
                 if (!iniFile.exists()) {
                     val written = IniParser.write(config)
@@ -749,7 +764,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun reloadConfig() {
-        val iniFile = File(docsDir, "writhdeck.ini")
+        val iniFile = File(configDir, "writhdeck.ini")
         val text = withContext(Dispatchers.IO) {
             if (iniFile.exists()) iniFile.readText() else return@withContext null
         } ?: return
@@ -822,7 +837,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         config = config.copy(scheme = name)
         applyConfig()
         viewModelScope.launch(Dispatchers.IO) {
-            val iniFile = File(docsDir, "writhdeck.ini")
+            val iniFile = File(configDir, "writhdeck.ini")
             if (iniFile.exists()) {
                 iniFile.writeText(IniParser.patchProfileKey(iniFile.readText(), config.activeProfile, "scheme", name))
             }
@@ -834,7 +849,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         config = config.copy(customSchemes = updated)
         applyConfig()
         viewModelScope.launch(Dispatchers.IO) {
-            val iniFile = File(docsDir, "writhdeck.ini")
+            val iniFile = File(configDir, "writhdeck.ini")
             val text = if (iniFile.exists()) iniFile.readText() else IniParser.write(config)
             iniFile.writeText(IniParser.writeCustomScheme(text, name, colors))
         }
@@ -847,7 +862,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         config = config.copy(customSchemes = updated, scheme = newScheme)
         applyConfig()
         viewModelScope.launch(Dispatchers.IO) {
-            val iniFile = File(docsDir, "writhdeck.ini")
+            val iniFile = File(configDir, "writhdeck.ini")
             if (iniFile.exists()) {
                 var text = IniParser.removeSchemeSection(iniFile.readText(), name)
                 if (wasActive) {
@@ -959,7 +974,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         hemingwayMode    = config.hemingwayMode,
         lineSpacing      = config.lineSpacing,
         browserFilter    = config.browserFilter,
-        browserShowAll   = config.browserShowAll
+        browserShowAll   = config.browserShowAll,
+        docsCustomDir    = config.docsCustomDir
     )
 
     fun applySettings(s: SettingsData) {
@@ -992,12 +1008,14 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             hemingwayMode    = s.hemingwayMode,
             lineSpacing      = s.lineSpacing,
             browserFilter    = s.browserFilter,
-            browserShowAll   = s.browserShowAll
+            browserShowAll   = s.browserShowAll,
+            docsCustomDir    = s.docsCustomDir
         )
         applyConfig()
+        refreshDocs()
         val activeProfile = config.activeProfile
         viewModelScope.launch(Dispatchers.IO) {
-            val iniFile = File(docsDir, "writhdeck.ini")
+            val iniFile = File(configDir, "writhdeck.ini")
             fun b(v: Boolean) = if (v) "yes" else "no"
             var text = if (iniFile.exists()) iniFile.readText() else IniParser.write(config)
             text = IniParser.patchKeys(text,
@@ -1028,7 +1046,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 "hemingway_mode"    to b(s.hemingwayMode),
                 "line_spacing"      to s.lineSpacing.toString(),
                 "browser_filter"    to s.browserFilter,
-                "browser_show_all"  to b(s.browserShowAll)
+                "browser_show_all"  to b(s.browserShowAll),
+                "docs_dir"          to s.docsCustomDir
             )
             text = IniParser.patchProfileKey(text, activeProfile, "scheme", s.scheme)
             // Ensure all built-in scheme sections are present (add missing ones)

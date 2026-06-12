@@ -2,10 +2,13 @@ package com.writhdeck.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -30,6 +33,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import android.graphics.Typeface
+import android.os.Environment
+import java.io.File
 import com.writhdeck.app.EDITOR_FONTS
 import com.writhdeck.app.SettingsData
 import com.writhdeck.app.WrithdeckViewModel
@@ -89,7 +94,7 @@ fun SettingsScreen(
                     2 -> FontsTab(s) { s = it }
                     3 -> SchemesTab(s, vm, onNavigateSchemes = { vm.applySettings(s); onNavigateSchemes() }) { s = it }
                     4 -> TimerTab(s) { s = it }
-                    5 -> MiscTab(s, onEditIni = { vm.applySettings(s); onEditIni() }) { s = it }
+                    5 -> MiscTab(s, vm, onEditIni = { vm.applySettings(s); onEditIni() }) { s = it }
                 }
             }
         }
@@ -268,8 +273,31 @@ private fun TimerTab(s: SettingsData, onChange: (SettingsData) -> Unit) {
 }
 
 @Composable
-private fun MiscTab(s: SettingsData, onEditIni: () -> Unit, onChange: (SettingsData) -> Unit) {
+private fun MiscTab(s: SettingsData, vm: WrithdeckViewModel, onEditIni: () -> Unit, onChange: (SettingsData) -> Unit) {
+    val storagePermissionGranted by vm.storagePermissionGranted.collectAsStateWithLifecycle()
+    var showFolderPicker by remember { mutableStateOf(false) }
+
     SwitchSettingRow("Hemingway mode", s.hemingwayMode) { onChange(s.copy(hemingwayMode = it)) }
+
+    SettingsSection("Documents folder")
+    StringSettingRow("Custom folder", s.docsCustomDir, enabled = storagePermissionGranted) {
+        onChange(s.copy(docsCustomDir = it))
+    }
+    OutlinedButton(
+        onClick = { showFolderPicker = true },
+        enabled = storagePermissionGranted,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+    ) {
+        Text("Browse…", fontFamily = FontFamily.Monospace)
+    }
+    if (!storagePermissionGranted) {
+        Text(
+            "Requires storage permission",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+        )
+    }
 
     SettingsSection("Browser")
     StringSettingRow("File filter", s.browserFilter) { onChange(s.copy(browserFilter = it)) }
@@ -287,6 +315,85 @@ private fun MiscTab(s: SettingsData, onEditIni: () -> Unit, onChange: (SettingsD
     ) {
         Text("Edit INI directly", fontFamily = FontFamily.Monospace)
     }
+
+    if (showFolderPicker) {
+        FolderPickerDialog(
+            initialPath = s.docsCustomDir,
+            onDismiss = { showFolderPicker = false },
+            onSelect = {
+                onChange(s.copy(docsCustomDir = it))
+                showFolderPicker = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun FolderPickerDialog(
+    initialPath: String,
+    onDismiss: () -> Unit,
+    onSelect: (String) -> Unit
+) {
+    val storageRoot = Environment.getExternalStorageDirectory()
+    var current by remember {
+        mutableStateOf(
+            initialPath.trim().takeIf { it.isNotEmpty() }
+                ?.let { File(it) }
+                ?.takeIf { it.isDirectory }
+                ?: storageRoot
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                current.absolutePath,
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall
+            )
+        },
+        text = {
+            val parent = current.parentFile
+            val children = remember(current) {
+                current.listFiles { f -> f.isDirectory && !f.isHidden }
+                    ?.sortedBy { it.name.lowercase() }
+                    ?: emptyList()
+            }
+            LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                if (parent != null && current.absolutePath != storageRoot.absolutePath) {
+                    item {
+                        Text(
+                            "..",
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.fillMaxWidth()
+                                .clickable { current = parent }
+                                .padding(vertical = 12.dp)
+                        )
+                    }
+                }
+                items(children) { dir ->
+                    Text(
+                        dir.name,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.fillMaxWidth()
+                            .clickable { current = dir }
+                            .padding(vertical = 12.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSelect(current.absolutePath) }) {
+                Text("Use this folder")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 @Composable
@@ -393,6 +500,7 @@ private fun SwitchSettingRow(
 private fun StringSettingRow(
     label: String,
     value: String,
+    enabled: Boolean = true,
     onChange: (String) -> Unit
 ) {
     Row(
@@ -404,12 +512,15 @@ private fun StringSettingRow(
         Text(
             text = label,
             modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyMedium
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (enabled) MaterialTheme.colorScheme.onSurface
+                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
         )
         OutlinedTextField(
             value = value,
             onValueChange = onChange,
             singleLine = true,
+            enabled = enabled,
             modifier = Modifier.weight(2f),
             textStyle = MaterialTheme.typography.bodyMedium.copy(
                 fontFamily = FontFamily.Monospace
