@@ -329,7 +329,7 @@ private fun MiscTab(s: SettingsData, vm: WrithdeckViewModel, onEditIni: () -> Un
 }
 
 @Composable
-private fun FolderPickerDialog(
+fun FolderPickerDialog(
     initialPath: String,
     onDismiss: () -> Unit,
     onSelect: (String) -> Unit

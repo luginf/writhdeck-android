@@ -34,6 +34,9 @@ fun AppNavigation(vm: WrithdeckViewModel = viewModel(), onRequestPermission: () 
                     vm.openScratchpad()
                     nav.navigate("editor") { launchSingleTop = true }
                 },
+                onOpenExternalFile = {
+                    nav.navigate("editor") { launchSingleTop = true }
+                },
                 onNavigateSchemes = {
                     nav.navigate("schemes") { launchSingleTop = true }
                 },

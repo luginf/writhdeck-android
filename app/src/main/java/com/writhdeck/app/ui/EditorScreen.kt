@@ -306,14 +306,21 @@ fun applyHeadingLevel(text: String, selStart: Int, selEnd: Int, marker: String, 
 // `marker` at the start of every selected line (e.g. comment marker).
 fun applyLineMarkerResult(text: String, selStart: Int, selEnd: Int, marker: String): Triple<String, Int, Int>? {
     if (marker.isEmpty()) return null
+    // Always separate the marker from the line's content with exactly one
+    // space (e.g. "% comment"), regardless of whether the configured marker
+    // itself already ends with whitespace (e.g. "%" or "% ").
+    val trimmed = marker.trimEnd()
     val minSel = minOf(selStart, selEnd)
     val maxSel = maxOf(selStart, selEnd)
     val blockStart = text.lastIndexOf('\n', (minSel - 1).coerceAtLeast(0))
         .let { if (it < 0) 0 else it + 1 }
     val blockEnd = text.indexOf('\n', maxSel).let { if (it < 0) text.length else it }
     val lines = text.substring(blockStart, blockEnd).split('\n')
-    val allMarked = lines.all { it.startsWith(marker) }
-    val newLines = if (allMarked) lines.map { it.removePrefix(marker) } else lines.map { marker + it }
+    val allMarked = lines.all { it.startsWith(trimmed) }
+    val newLines = if (allMarked) lines.map {
+        val rest = it.removePrefix(trimmed)
+        if (rest.startsWith(' ')) rest.substring(1) else rest
+    } else lines.map { if (it.isEmpty()) trimmed else "$trimmed $it" }
     val newBlock = newLines.joinToString("\n")
     val newText = text.substring(0, blockStart) + newBlock + text.substring(blockEnd)
     return Triple(newText, blockStart, blockStart + newBlock.length)
@@ -417,9 +424,17 @@ fun computeSectionAnalysis(toc: List<TocEntry>, content: String): List<SectionAn
     }
 }
 
+// Tappable shortcuts shown in the command-mode bar — mirrors the `when` switch
+// in performCmdAction(letter), one entry per supported one-letter action.
+private val CMD_ACTIONS = listOf(
+    'f' to "find", 'r' to "replace", 'g' to "goto", 'n' to "line#",
+    'd' to "dark", 'o' to "toc", 'w' to "typewriter", 't' to "timer",
+    's' to "stats", 'a' to "analyse", 'm' to "menu", 'c' to "settings", 'q' to "close"
+)
+
 private data class EditorStyle(
     val fgColor: Int, val fontSizeSp: Float, val lineSpacingMult: Float,
-    val padX: Int, val padY: Int, val writable: Boolean, val hemingway: Boolean,
+    val padX: Int, val padY: Int, val padBottom: Int, val writable: Boolean, val hemingway: Boolean,
     val fontFamily: String, val fontBold: Boolean, val blockCursor: Boolean
 )
 
@@ -512,6 +527,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val marginWidthPx  = remember(marginWidth,  density) { with(density) { marginWidth.dp.roundToPx() } }
     val marginHeightPx = remember(marginHeight, density) { with(density) { marginHeight.dp.roundToPx() } }
 
+
     // Modal command mode (mirrors Tcl/Web "Echap"): toggled by `keyCmdMode` (default
     // Escape). While active, the next key performs a one-letter action and exits.
     var cmdMode by remember { mutableStateOf(false) }
@@ -537,7 +553,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val keyHandlerRef   = remember { arrayOf<(Int, AKeyEvent) -> Boolean>({ _, _ -> false }) }
     @Suppress("UNCHECKED_CAST")
     val originalKeyListener = remember { arrayOfNulls<android.text.method.KeyListener>(1) }
-    val lastStyle = remember { arrayOf(EditorStyle(0, 0f, 0f, -1, -1, true, false, "", false, false)) }
+    val lastStyle = remember { arrayOf(EditorStyle(0, 0f, 0f, -1, -1, -1, true, false, "", false, false)) }
     val hemingwayFilter = remember {
         android.text.InputFilter { _, start, end, dest, dstart, dend ->
             if (dend - dstart > end - start) dest.subSequence(dstart, dend) else null
@@ -683,6 +699,37 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         }
     }
 
+    // Runs the one-letter command-mode action (mirrors Tcl/Web "Echap" letters),
+    // then exits command mode. Shared by the hardware-key handler (cmdMode branch)
+    // and the tappable CMD bar items (CMD_ACTIONS), so both paths stay in sync.
+    fun performCmdAction(letter: Char) {
+        cmdMode = false
+        when (letter) {
+            'f' -> { showFind = true; findReplace = false }
+            'r' -> { showFind = true; findReplace = true }
+            'g' -> { showGotoLine = true; gotoLineValue = "" }
+            'n' -> vm.setLineNumbersEnabled(!lineNumbersEnabled)
+            'd' -> vm.setDarkModePreference(
+                when (darkPref) { "auto" -> "yes"; "yes" -> "no"; else -> "auto" }
+            )
+            'o' -> if (toc.isNotEmpty()) showToc = true
+            'w' -> typewriterMode = !typewriterMode
+            't' -> when {
+                !timerActive && timerLastTick == 0L -> vm.timerStart()
+                timerActive -> vm.timerPause()
+                else -> vm.timerResume()
+            }
+            's' -> scope.launch { statsData = vm.getDailyStats(); showStats = true }
+            'a' -> if (toc.isNotEmpty()) {
+                analyseData = computeSectionAnalysis(toc, content); showAnalyse = true
+            }
+            'm' -> showMenu = true
+            'c' -> onNavigateSettings()
+            'q' -> requestClose()
+            else -> {}
+        }
+    }
+
     // Syntax highlighting — computed async with 300ms debounce to avoid blocking on large files.
     LaunchedEffect(
         content, headingMarker, markdownHeadings,
@@ -742,6 +789,268 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         append(currentFile?.name ?: "Editor")
         if (!fileWritable) append(" [read-only]") else if (dirty) append(" *")
     }
+    @Composable
+    fun MenuItems() {
+        // ⌨ Command mode (mirrors Web's top-of-menu entry: Esc / Alt+C)
+        DropdownMenuItem(
+            text = { Text("Command mode", fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; cmdMode = !cmdMode },
+            trailingIcon = { Text("$keyCmdMode / Alt+C", style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant) }
+        )
+        HorizontalDivider()
+        // — View —
+        DropdownMenuItem(
+            text = { Text("Table of contents", fontFamily = FontFamily.Monospace) },
+            enabled = toc.isNotEmpty(),
+            onClick = { showMenu = false; showToc = true },
+            trailingIcon = { Text(keyToc, style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant) }
+        )
+        DropdownMenuItem(
+            text = { Text("Dark: $darkPref", fontFamily = FontFamily.Monospace) },
+            onClick = {
+                showMenu = false
+                vm.setDarkModePreference(when (darkPref) { "auto" -> "yes"; "yes" -> "no"; else -> "auto" })
+            }
+        )
+        DropdownMenuItem(
+            text = { Text("Line numbers", fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; vm.setLineNumbersEnabled(!lineNumbersEnabled) },
+            trailingIcon = { Text(keyLineNumbers, style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant) }
+        )
+        DropdownMenuItem(
+            text = { Text("Typewriter mode", fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; typewriterMode = !typewriterMode },
+            trailingIcon = { Text(keyTypewriter, style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant) }
+        )
+        DropdownMenuItem(
+            text = { Text("Distraction-free", fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; distractionFree = true }
+        )
+        // The TopAppBar (and its Save button) is hidden in distraction-free mode,
+        // so offer Save here instead — only entry point for saving without leaving it.
+        if (distractionFree) {
+            DropdownMenuItem(
+                text = { Text("Save", fontFamily = FontFamily.Monospace) },
+                enabled = dirty && fileWritable,
+                onClick = { showMenu = false; vm.saveFile() },
+                trailingIcon = { Text(keySave, style = MaterialTheme.typography.labelSmall,
+                    color = colorScheme.onSurfaceVariant) }
+            )
+        }
+        DropdownMenuItem(
+            text = { Text(
+                if (wsDualMode) "Workspace $wsActive → ${if (wsActive == 1) 2 else 1}"
+                else "Open workspace 2",
+                fontFamily = FontFamily.Monospace
+            ) },
+            onClick = {
+                val offset = editorRef.value?.selectionStart ?: 0
+                showMenu = false; vm.toggleWorkspace(offset)
+            }
+        )
+        HorizontalDivider()
+        // — Search —
+        DropdownMenuItem(
+            text = { Text("Find", fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; showFind = true },
+            trailingIcon = { Text("⌘F", style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant) }
+        )
+        DropdownMenuItem(
+            text = { Text("Find & Replace", fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; showFind = true; findReplace = true },
+            trailingIcon = { Text("⌘H", style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant) }
+        )
+        DropdownMenuItem(
+            text = { Text("Goto line…", fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; showGotoLine = true; gotoLineValue = "" },
+            trailingIcon = { Text("⌘G", style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant) }
+        )
+        HorizontalDivider()
+        // — Format — (mirrors Web's dynamic Format labels, openMenu() in app.js)
+        DropdownMenuItem(
+            text = { Text(
+                if (headingMarker.isNotEmpty()) "$headingMarker H1 $headingMarker" else "H1",
+                fontFamily = FontFamily.Monospace
+            ) },
+            enabled = headingMarker.isNotEmpty(),
+            onClick = {
+                val et = editorRef.value
+                if (et != null) applyEditResult(applyHeadingLevel(
+                    et.text.toString(), et.selectionStart, et.selectionEnd, headingMarker, 1))
+                showMenu = false
+            }
+        )
+        DropdownMenuItem(
+            text = { Text(
+                if (headingMarker.isNotEmpty())
+                    "${headingMarker.repeat(2)} H2 ${headingMarker.repeat(2)}" else "H2",
+                fontFamily = FontFamily.Monospace
+            ) },
+            enabled = headingMarker.isNotEmpty(),
+            onClick = {
+                val et = editorRef.value
+                if (et != null) applyEditResult(applyHeadingLevel(
+                    et.text.toString(), et.selectionStart, et.selectionEnd, headingMarker, 2))
+                showMenu = false
+            }
+        )
+        DropdownMenuItem(
+            text = { Text(
+                if (headingMarker.isNotEmpty())
+                    "${headingMarker.repeat(3)} H3 ${headingMarker.repeat(3)}" else "H3",
+                fontFamily = FontFamily.Monospace
+            ) },
+            enabled = headingMarker.isNotEmpty(),
+            onClick = {
+                val et = editorRef.value
+                if (et != null) applyEditResult(applyHeadingLevel(
+                    et.text.toString(), et.selectionStart, et.selectionEnd, headingMarker, 3))
+                showMenu = false
+            }
+        )
+        DropdownMenuItem(
+            text = { Text(
+                if (commentMarker.isNotEmpty()) "$commentMarker Comment" else "Comment",
+                fontFamily = FontFamily.Monospace
+            ) },
+            enabled = commentMarker.isNotEmpty(),
+            onClick = {
+                val et = editorRef.value
+                if (et != null) applyEditResult(applyLineMarkerResult(
+                    et.text.toString(), et.selectionStart, et.selectionEnd, commentMarker))
+                showMenu = false
+            }
+        )
+        DropdownMenuItem(
+            text = { Text(
+                if (boldMarker.isNotEmpty()) "$boldMarker Bold" else "Bold",
+                fontFamily = FontFamily.Monospace
+            ) },
+            enabled = boldMarker.isNotEmpty(),
+            onClick = {
+                val et = editorRef.value
+                if (et != null) applyEditResult(applyInlineMarkerResult(
+                    et.text.toString(), et.selectionStart, et.selectionEnd, boldMarker))
+                showMenu = false
+            }
+        )
+        DropdownMenuItem(
+            text = { Text(
+                if (italicMarker.isNotEmpty()) "$italicMarker Italic" else "Italic",
+                fontFamily = FontFamily.Monospace
+            ) },
+            enabled = italicMarker.isNotEmpty(),
+            onClick = {
+                val et = editorRef.value
+                if (et != null) applyEditResult(applyInlineMarkerResult(
+                    et.text.toString(), et.selectionStart, et.selectionEnd, italicMarker))
+                showMenu = false
+            }
+        )
+        DropdownMenuItem(
+            text = { Text(
+                if (underlineMarker.isNotEmpty()) "$underlineMarker Underline" else "Underline",
+                fontFamily = FontFamily.Monospace
+            ) },
+            enabled = underlineMarker.isNotEmpty(),
+            onClick = {
+                val et = editorRef.value
+                if (et != null) applyEditResult(applyInlineMarkerResult(
+                    et.text.toString(), et.selectionStart, et.selectionEnd, underlineMarker))
+                showMenu = false
+            }
+        )
+        DropdownMenuItem(
+            text = { Text(
+                if (strikethroughMarker.isNotEmpty()) "$strikethroughMarker Strike" else "Strike",
+                fontFamily = FontFamily.Monospace
+            ) },
+            enabled = strikethroughMarker.isNotEmpty(),
+            onClick = {
+                val et = editorRef.value
+                if (et != null) applyEditResult(applyInlineMarkerResult(
+                    et.text.toString(), et.selectionStart, et.selectionEnd, strikethroughMarker))
+                showMenu = false
+            }
+        )
+        HorizontalDivider()
+        // — Document —
+        DropdownMenuItem(
+            text = { Text("Writing stats", fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; scope.launch { statsData = vm.getDailyStats(); showStats = true } }
+        )
+        DropdownMenuItem(
+            text = { Text("Structure analysis", fontFamily = FontFamily.Monospace) },
+            enabled = toc.isNotEmpty(),
+            onClick = { showMenu = false; analyseData = computeSectionAnalysis(toc, content); showAnalyse = true }
+        )
+        DropdownMenuItem(
+            text = { Text("Word frequency", fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; scope.launch { wordsData = vm.getWordOccurrences(); showWords = true } }
+        )
+        DropdownMenuItem(
+            text = { Text("File info", fontFamily = FontFamily.Monospace) },
+            enabled = currentFile != null,
+            onClick = { showMenu = false; showFileInfo = true }
+        )
+        DropdownMenuItem(
+            text = { Text("Export as .txt", fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; exportLauncher.launch(exportFileName("txt")) }
+        )
+        DropdownMenuItem(
+            text = { Text("Export as .md", fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; exportLauncher.launch(exportFileName("md")) }
+        )
+        HorizontalDivider()
+        // — App —
+        val timerLabel = when {
+            !timerActive && timerLastTick == 0L -> "Start timer"
+            timerActive -> "Pause  ${formatTimer(timerRemaining, true).trim()}"
+            else -> "Resume  ${formatTimer(timerRemaining, false).trim()}"
+        }
+        DropdownMenuItem(
+            text = { Text(timerLabel, fontFamily = FontFamily.Monospace,
+                color = if (timerActive) colorScheme.primary else colorScheme.onSurface) },
+            onClick = {
+                showMenu = false
+                when {
+                    !timerActive && timerLastTick == 0L -> vm.timerStart()
+                    timerActive -> vm.timerPause()
+                    else -> vm.timerResume()
+                }
+            }
+        )
+        if (timerLastTick != 0L || timerActive) {
+            DropdownMenuItem(
+                text = { Text("Reset timer", fontFamily = FontFamily.Monospace) },
+                onClick = { showMenu = false; vm.timerReset() }
+            )
+        }
+        DropdownMenuItem(
+            text = { Text("Block cursor", fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; vm.setBlockCursor(!blockCursor) },
+            trailingIcon = { Text(if (blockCursor) "on" else "off", style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant) }
+        )
+        DropdownMenuItem(
+            text = { Text("Settings", fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; onNavigateSettings() }
+        )
+        // The menu can be taller than the screen (anchored near the top, near a
+        // long item list) — without trailing space, "Settings" lands flush against
+        // the bottom edge and the scrollable area ends right at it, making it hard
+        // to reach/tap. An empty disabled item gives the scroll room to bring
+        // "Settings" clear of the edge.
+        DropdownMenuItem(text = { Text("") }, onClick = {}, enabled = false)
+    }
+
 
     Scaffold(
         topBar = {
@@ -761,248 +1070,8 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                         IconButton(onClick = { showMenu = true }) {
                             Icon(Icons.Filled.MoreVert, contentDescription = "More options")
                         }
-                        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                            // ⌨ Command mode (mirrors Web's top-of-menu entry: Esc / Alt+C)
-                            DropdownMenuItem(
-                                text = { Text("Command mode", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; cmdMode = !cmdMode },
-                                trailingIcon = { Text("$keyCmdMode / Alt+C", style = MaterialTheme.typography.labelSmall,
-                                    color = colorScheme.onSurfaceVariant) }
-                            )
-                            HorizontalDivider()
-                            // — View —
-                            DropdownMenuItem(
-                                text = { Text("Table of contents", fontFamily = FontFamily.Monospace) },
-                                enabled = toc.isNotEmpty(),
-                                onClick = { showMenu = false; showToc = true },
-                                trailingIcon = { Text(keyToc, style = MaterialTheme.typography.labelSmall,
-                                    color = colorScheme.onSurfaceVariant) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Dark: $darkPref", fontFamily = FontFamily.Monospace) },
-                                onClick = {
-                                    showMenu = false
-                                    vm.setDarkModePreference(when (darkPref) { "auto" -> "yes"; "yes" -> "no"; else -> "auto" })
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Line numbers", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; vm.setLineNumbersEnabled(!lineNumbersEnabled) },
-                                trailingIcon = { Text(keyLineNumbers, style = MaterialTheme.typography.labelSmall,
-                                    color = colorScheme.onSurfaceVariant) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Typewriter mode", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; typewriterMode = !typewriterMode },
-                                trailingIcon = { Text(keyTypewriter, style = MaterialTheme.typography.labelSmall,
-                                    color = colorScheme.onSurfaceVariant) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Distraction-free", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; distractionFree = true }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(
-                                    if (wsDualMode) "Workspace $wsActive → ${if (wsActive == 1) 2 else 1}"
-                                    else "Open workspace 2",
-                                    fontFamily = FontFamily.Monospace
-                                ) },
-                                onClick = {
-                                    val offset = editorRef.value?.selectionStart ?: 0
-                                    showMenu = false; vm.toggleWorkspace(offset)
-                                }
-                            )
-                            HorizontalDivider()
-                            // — Search —
-                            DropdownMenuItem(
-                                text = { Text("Find", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; showFind = true },
-                                trailingIcon = { Text("⌘F", style = MaterialTheme.typography.labelSmall,
-                                    color = colorScheme.onSurfaceVariant) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Find & Replace", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; showFind = true; findReplace = true },
-                                trailingIcon = { Text("⌘H", style = MaterialTheme.typography.labelSmall,
-                                    color = colorScheme.onSurfaceVariant) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Goto line…", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; showGotoLine = true; gotoLineValue = "" },
-                                trailingIcon = { Text("⌘G", style = MaterialTheme.typography.labelSmall,
-                                    color = colorScheme.onSurfaceVariant) }
-                            )
-                            HorizontalDivider()
-                            // — Format — (mirrors Web's dynamic Format labels, openMenu() in app.js)
-                            DropdownMenuItem(
-                                text = { Text(
-                                    if (headingMarker.isNotEmpty()) "$headingMarker H1 $headingMarker" else "H1",
-                                    fontFamily = FontFamily.Monospace
-                                ) },
-                                enabled = headingMarker.isNotEmpty(),
-                                onClick = {
-                                    val et = editorRef.value
-                                    if (et != null) applyEditResult(applyHeadingLevel(
-                                        et.text.toString(), et.selectionStart, et.selectionEnd, headingMarker, 1))
-                                    showMenu = false
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(
-                                    if (headingMarker.isNotEmpty())
-                                        "${headingMarker.repeat(2)} H2 ${headingMarker.repeat(2)}" else "H2",
-                                    fontFamily = FontFamily.Monospace
-                                ) },
-                                enabled = headingMarker.isNotEmpty(),
-                                onClick = {
-                                    val et = editorRef.value
-                                    if (et != null) applyEditResult(applyHeadingLevel(
-                                        et.text.toString(), et.selectionStart, et.selectionEnd, headingMarker, 2))
-                                    showMenu = false
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(
-                                    if (headingMarker.isNotEmpty())
-                                        "${headingMarker.repeat(3)} H3 ${headingMarker.repeat(3)}" else "H3",
-                                    fontFamily = FontFamily.Monospace
-                                ) },
-                                enabled = headingMarker.isNotEmpty(),
-                                onClick = {
-                                    val et = editorRef.value
-                                    if (et != null) applyEditResult(applyHeadingLevel(
-                                        et.text.toString(), et.selectionStart, et.selectionEnd, headingMarker, 3))
-                                    showMenu = false
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(
-                                    if (commentMarker.isNotEmpty()) "$commentMarker Comment" else "Comment",
-                                    fontFamily = FontFamily.Monospace
-                                ) },
-                                enabled = commentMarker.isNotEmpty(),
-                                onClick = {
-                                    val et = editorRef.value
-                                    if (et != null) applyEditResult(applyLineMarkerResult(
-                                        et.text.toString(), et.selectionStart, et.selectionEnd, commentMarker))
-                                    showMenu = false
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(
-                                    if (boldMarker.isNotEmpty()) "$boldMarker Bold" else "Bold",
-                                    fontFamily = FontFamily.Monospace
-                                ) },
-                                enabled = boldMarker.isNotEmpty(),
-                                onClick = {
-                                    val et = editorRef.value
-                                    if (et != null) applyEditResult(applyInlineMarkerResult(
-                                        et.text.toString(), et.selectionStart, et.selectionEnd, boldMarker))
-                                    showMenu = false
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(
-                                    if (italicMarker.isNotEmpty()) "$italicMarker Italic" else "Italic",
-                                    fontFamily = FontFamily.Monospace
-                                ) },
-                                enabled = italicMarker.isNotEmpty(),
-                                onClick = {
-                                    val et = editorRef.value
-                                    if (et != null) applyEditResult(applyInlineMarkerResult(
-                                        et.text.toString(), et.selectionStart, et.selectionEnd, italicMarker))
-                                    showMenu = false
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(
-                                    if (underlineMarker.isNotEmpty()) "$underlineMarker Underline" else "Underline",
-                                    fontFamily = FontFamily.Monospace
-                                ) },
-                                enabled = underlineMarker.isNotEmpty(),
-                                onClick = {
-                                    val et = editorRef.value
-                                    if (et != null) applyEditResult(applyInlineMarkerResult(
-                                        et.text.toString(), et.selectionStart, et.selectionEnd, underlineMarker))
-                                    showMenu = false
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(
-                                    if (strikethroughMarker.isNotEmpty()) "$strikethroughMarker Strike" else "Strike",
-                                    fontFamily = FontFamily.Monospace
-                                ) },
-                                enabled = strikethroughMarker.isNotEmpty(),
-                                onClick = {
-                                    val et = editorRef.value
-                                    if (et != null) applyEditResult(applyInlineMarkerResult(
-                                        et.text.toString(), et.selectionStart, et.selectionEnd, strikethroughMarker))
-                                    showMenu = false
-                                }
-                            )
-                            HorizontalDivider()
-                            // — Document —
-                            DropdownMenuItem(
-                                text = { Text("Writing stats", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; scope.launch { statsData = vm.getDailyStats(); showStats = true } }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Structure analysis", fontFamily = FontFamily.Monospace) },
-                                enabled = toc.isNotEmpty(),
-                                onClick = { showMenu = false; analyseData = computeSectionAnalysis(toc, content); showAnalyse = true }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Word frequency", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; scope.launch { wordsData = vm.getWordOccurrences(); showWords = true } }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("File info", fontFamily = FontFamily.Monospace) },
-                                enabled = currentFile != null,
-                                onClick = { showMenu = false; showFileInfo = true }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Export as .txt", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; exportLauncher.launch(exportFileName("txt")) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Export as .md", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; exportLauncher.launch(exportFileName("md")) }
-                            )
-                            HorizontalDivider()
-                            // — App —
-                            val timerLabel = when {
-                                !timerActive && timerLastTick == 0L -> "Start timer"
-                                timerActive -> "Pause  ${formatTimer(timerRemaining, true).trim()}"
-                                else -> "Resume  ${formatTimer(timerRemaining, false).trim()}"
-                            }
-                            DropdownMenuItem(
-                                text = { Text(timerLabel, fontFamily = FontFamily.Monospace,
-                                    color = if (timerActive) colorScheme.primary else colorScheme.onSurface) },
-                                onClick = {
-                                    showMenu = false
-                                    when {
-                                        !timerActive && timerLastTick == 0L -> vm.timerStart()
-                                        timerActive -> vm.timerPause()
-                                        else -> vm.timerResume()
-                                    }
-                                }
-                            )
-                            if (timerLastTick != 0L || timerActive) {
-                                DropdownMenuItem(
-                                    text = { Text("Reset timer", fontFamily = FontFamily.Monospace) },
-                                    onClick = { showMenu = false; vm.timerReset() }
-                                )
-                            }
-                            DropdownMenuItem(
-                                text = { Text("Block cursor", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; vm.setBlockCursor(!blockCursor) },
-                                trailingIcon = { Text(if (blockCursor) "on" else "off", style = MaterialTheme.typography.labelSmall,
-                                    color = colorScheme.onSurfaceVariant) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Settings", fontFamily = FontFamily.Monospace) },
-                                onClick = { showMenu = false; onNavigateSettings() }
-                            )
+                        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.navigationBarsPadding()) {
+                            MenuItems()
                         }
                     }
                 }
@@ -1010,27 +1079,53 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
-            if (!distractionFree && !hemingwayActive) Surface(
-                tonalElevation = 2.dp,
-                color = if (cmdMode) colorScheme.primaryContainer else colorScheme.surface
-            ) {
-                if (cmdMode) {
-                    // Command-mode hint bar (mirrors Tcl's ed_bar_center while gui_cmd_mode is on).
+            if (cmdMode) {
+                // Command-mode hint bar (mirrors Tcl's ed_bar_center while gui_cmd_mode is on).
+                // Shown whenever command mode is active — including distraction-free
+                // mode, where the TopAppBar/status bar are otherwise hidden — and
+                // raised above the virtual keyboard via imePadding() when it's shown.
+                Surface(
+                    tonalElevation = 2.dp,
+                    color = colorScheme.primaryContainer,
+                    modifier = Modifier.imePadding()
+                ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
                             .navigationBarsPadding()
                             .horizontalScroll(rememberScrollState()),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            "CMD  f:find r:replace g:goto n:line# d:dark o:toc w:typewriter " +
-                                "t:timer s:stats a:analyse m:menu c:settings q:close   ($keyCmdMode=cancel)",
-                            fontFamily = FontFamily.Monospace, maxLines = 1,
+                            "CMD", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,
                             style = MaterialTheme.typography.bodySmall,
-                            color = colorScheme.onPrimaryContainer
+                            color = colorScheme.onPrimaryContainer,
+                            modifier = Modifier.padding(end = 10.dp)
+                        )
+                        for ((letter, label) in CMD_ACTIONS) {
+                            val enabled = (letter != 'o' && letter != 'a') || toc.isNotEmpty()
+                            Text(
+                                "$letter:$label",
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colorScheme.onPrimaryContainer.copy(alpha = if (enabled) 1f else 0.4f),
+                                modifier = Modifier
+                                    .clickable { performCmdAction(letter) }
+                                    .padding(horizontal = 6.dp, vertical = 8.dp)
+                            )
+                        }
+                        Text(
+                            "($keyCmdMode=cancel)",
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onPrimaryContainer,
+                            modifier = Modifier
+                                .clickable { cmdMode = false }
+                                .padding(horizontal = 6.dp, vertical = 8.dp)
                         )
                     }
-                } else {
+                }
+            } else if (!distractionFree && !hemingwayActive) {
+                Surface(tonalElevation = 2.dp, color = colorScheme.surface) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
                             .navigationBarsPadding(),
@@ -1051,6 +1146,15 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
             }
         }
     ) { padding ->
+        // Virtual keyboard space: the content Box's height doesn't shrink for the IME —
+        // Scaffold only ever insets it by `padding` (status bar / nav bar). When the IME
+        // opens, the keyboard overlaps the bottom of this Box by (ime height - that
+        // existing inset). Add exactly that much extra bottom padding to the EditText so
+        // the last line can be scrolled up clear of the keyboard, without leaving a
+        // visible blank band (which happens if this overshoots) or being unreachable
+        // (if omitted entirely).
+        val extraBottomPadPx = (WindowInsets.ime.getBottom(density) -
+            with(density) { padding.calculateBottomPadding().roundToPx() }).coerceAtLeast(0)
         Box(modifier = Modifier.fillMaxSize().background(editorBg).padding(padding)) {
 
             Row(modifier = Modifier.fillMaxSize()) {
@@ -1120,7 +1224,8 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     }
                     // Guard all layout-invalidating calls — avoids scroll jank from timer recompositions.
                     val newStyle = EditorStyle(editorFgInt, fontSize.toFloat(), lineSpacing,
-                                               effMarginWidthPx, effMarginHeightPx, fileWritable, hemingwayActive,
+                                               effMarginWidthPx, effMarginHeightPx, effMarginHeightPx + extraBottomPadPx,
+                                               fileWritable, hemingwayActive,
                                                fontFamily, fontBold, blockCursor)
                     if (lastStyle[0] != newStyle) {
                         editText.setTextColor(newStyle.fgColor)
@@ -1130,7 +1235,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                         }
                         editText.setTextSize(TypedValue.COMPLEX_UNIT_SP, newStyle.fontSizeSp)
                         editText.setLineSpacing(0f, newStyle.lineSpacingMult)
-                        editText.setPadding(newStyle.padX, newStyle.padY, newStyle.padX, newStyle.padY)
+                        editText.setPadding(newStyle.padX, newStyle.padY, newStyle.padX, newStyle.padBottom)
                         editText.keyListener = if (newStyle.writable) originalKeyListener[0] else null
                         editText.filters = if (newStyle.hemingway && newStyle.writable)
                             arrayOf(hemingwayFilter) else emptyArray()
@@ -1158,31 +1263,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                             // Modal command mode (mirrors Tcl/Web "Echap"): the next key performs
                             // a one-letter action, then cmd mode exits — every key is swallowed.
                             cmdMode -> {
-                                cmdMode = false
-                                when (event.unicodeChar.toChar().lowercaseChar()) {
-                                    'f' -> { showFind = true; findReplace = false }
-                                    'r' -> { showFind = true; findReplace = true }
-                                    'g' -> { showGotoLine = true; gotoLineValue = "" }
-                                    'n' -> vm.setLineNumbersEnabled(!lineNumbersEnabled)
-                                    'd' -> vm.setDarkModePreference(
-                                        when (darkPref) { "auto" -> "yes"; "yes" -> "no"; else -> "auto" }
-                                    )
-                                    'o' -> if (toc.isNotEmpty()) showToc = true
-                                    'w' -> typewriterMode = !typewriterMode
-                                    't' -> when {
-                                        !timerActive && timerLastTick == 0L -> vm.timerStart()
-                                        timerActive -> vm.timerPause()
-                                        else -> vm.timerResume()
-                                    }
-                                    's' -> scope.launch { statsData = vm.getDailyStats(); showStats = true }
-                                    'a' -> if (toc.isNotEmpty()) {
-                                        analyseData = computeSectionAnalysis(toc, content); showAnalyse = true
-                                    }
-                                    'm' -> showMenu = true
-                                    'c' -> onNavigateSettings()
-                                    'q' -> requestClose()
-                                    else -> {}
-                                }
+                                performCmdAction(event.unicodeChar.toChar().lowercaseChar())
                                 true
                             }
                             // Hemingway restrictions only apply while typewriter mode is active
@@ -1230,6 +1311,10 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                                 }
                                 true
                             }
+                            // Alt+M — show the "≡" menu (mirrors web's Alt+M)
+                            event.isAltPressed && keyCode == AKeyEvent.KEYCODE_M -> {
+                                showMenu = true; true
+                            }
                             !ctrl && keyCode == AKeyEvent.KEYCODE_ESCAPE && showFind -> {
                                 showFind = false; findQuery = ""; findReplace = false; true
                             }
@@ -1270,6 +1355,17 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                 ) {
                     Icon(Icons.Filled.FullscreenExit, contentDescription = "Exit distraction-free",
                          tint = editorFg.copy(alpha = 0.35f))
+                }
+                // "≡" menu — also reachable here so cmd-mode `m` / Alt+M still
+                // shows the menu while the TopAppBar is hidden.
+                Box(modifier = Modifier.align(Alignment.TopEnd).padding(top = 48.dp, end = 4.dp)) {
+                    IconButton(onClick = { showMenu = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "Menu",
+                             tint = editorFg.copy(alpha = 0.35f))
+                    }
+                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.navigationBarsPadding()) {
+                        MenuItems()
+                    }
                 }
             }
 

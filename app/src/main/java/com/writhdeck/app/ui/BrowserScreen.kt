@@ -1,6 +1,9 @@
 package com.writhdeck.app.ui
 
+import android.content.Intent
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -12,13 +15,12 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Keyboard
-import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -31,6 +33,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
@@ -54,6 +57,7 @@ fun BrowserScreen(
     vm: WrithdeckViewModel,
     onOpenFile: (DocEntry) -> Unit,
     onOpenScratchpad: () -> Unit = {},
+    onOpenExternalFile: () -> Unit = {},
     onNavigateSchemes: () -> Unit = {},
     onNavigateSettings: () -> Unit = {},
     onRequestPermission: () -> Unit
@@ -64,10 +68,10 @@ fun BrowserScreen(
     val storageGranted by vm.storagePermissionGranted.collectAsStateWithLifecycle()
     val engineReady by vm.engineReady.collectAsStateWithLifecycle()
     val snackbarMessage by vm.snackbarMessage.collectAsStateWithLifecycle()
-    val darkPref by vm.darkModePreference.collectAsStateWithLifecycle()
 
     var showNewDialog by remember { mutableStateOf(false) }
     var newFileName by remember { mutableStateOf("") }
+    var showFolderPicker by remember { mutableStateOf(false) }
     var permissionBannerDismissed by remember { mutableStateOf(false) }
 
     var contextEntry by remember { mutableStateOf<DocEntry?>(null) }
@@ -102,6 +106,23 @@ fun BrowserScreen(
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
     var imeAllowed by remember { mutableStateOf(false) }
     var shortcutBuffer by remember { mutableStateOf(TextFieldValue("")) }
+
+    // Select file: open an individual file from anywhere on disk — mirrors the
+    // web version's `o` shortcut / openFromDisk() (File System Access API).
+    val context = LocalContext.current
+    val openFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (_: SecurityException) {}
+            imeAllowed = false
+            vm.openExternalContent(uri, context.contentResolver, true)
+            onOpenExternalFile()
+        }
+    }
 
     // Arrow-key navigation over the visible file list — mirrors the web version's
     // ArrowUp/ArrowDown handling of `.br-nav-item` rows (ordered Favorites -> Documents -> Recent).
@@ -178,19 +199,18 @@ fun BrowserScreen(
             TopAppBar(
                 title = { Text("WrithDeck", fontFamily = FontFamily.Monospace) },
                 actions = {
-                    // Dark mode toggle: auto -> yes -> no -> auto
-                    val darkModeIcon = when (darkPref) {
-                        "yes" -> Icons.Filled.DarkMode
-                        "no"  -> Icons.Filled.LightMode
-                        else  -> Icons.Outlined.DarkMode
+                    // Select folder: change the documents folder — mirrors the web
+                    // version's `w` shortcut / openFolder() (watch a local folder).
+                    IconButton(
+                        onClick = { showFolderPicker = true },
+                        enabled = storageGranted
+                    ) {
+                        Icon(Icons.Filled.FolderOpen, contentDescription = "Select folder")
                     }
-                    val nextDarkPref = when (darkPref) {
-                        "auto" -> "yes"
-                        "yes"  -> "no"
-                        else   -> "auto"
-                    }
-                    IconButton(onClick = { vm.setDarkModePreference(nextDarkPref) }) {
-                        Icon(darkModeIcon, contentDescription = "Dark mode: $darkPref")
+                    // Select file: open an individual file — mirrors the web
+                    // version's `o` shortcut / openFromDisk().
+                    IconButton(onClick = { openFileLauncher.launch(arrayOf("*/*")) }) {
+                        Icon(Icons.Filled.FileOpen, contentDescription = "Select file")
                     }
                     // Virtual keyboard toggle
                     IconButton(onClick = {
@@ -583,6 +603,19 @@ fun BrowserScreen(
                 TextButton(onClick = { showNewDialog = false; newFileName = "" }) {
                     Text("Cancel")
                 }
+            }
+        )
+    }
+
+    // Select folder dialog
+    if (showFolderPicker) {
+        val s = vm.getSettingsData()
+        FolderPickerDialog(
+            initialPath = s.docsCustomDir,
+            onDismiss = { showFolderPicker = false },
+            onSelect = {
+                vm.applySettings(s.copy(docsCustomDir = it))
+                showFolderPicker = false
             }
         )
     }
