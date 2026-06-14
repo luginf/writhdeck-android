@@ -73,7 +73,8 @@ data class SettingsData(
     val lineSpacing: Float = 1.5f,
     val browserFilter: String = "*.txt *.t2t *.md *.ini",
     val browserShowAll: Boolean = false,
-    val docsCustomDir: String = ""
+    val docsCustomDir: String = "",
+    val spellCheckEnabled: Boolean = true
 )
 
 class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
@@ -125,6 +126,14 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     private val _currentFile = MutableStateFlow<DocEntry?>(null)
     val currentFile = _currentFile.asStateFlow()
 
+    // One-shot signal: an external file (Intent VIEW/EDIT) was just loaded and
+    // the UI should navigate to the editor. Consumed by AppNavigation so that
+    // a later recomposition (e.g. on rotation, with currentFile still set from
+    // a since-closed document) doesn't re-trigger navigation to the editor.
+    private val _pendingExternalOpen = MutableStateFlow(false)
+    val pendingExternalOpen = _pendingExternalOpen.asStateFlow()
+    fun consumeExternalOpen() { _pendingExternalOpen.value = false }
+
     private val _dirty = MutableStateFlow(false)
     val dirty = _dirty.asStateFlow()
 
@@ -174,6 +183,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     private val _blockCursor = MutableStateFlow(false)
     val blockCursor = _blockCursor.asStateFlow()
 
+    private val _spellCheckEnabled = MutableStateFlow(true)
+    val spellCheckEnabled = _spellCheckEnabled.asStateFlow()
+
     private val _timerType = MutableStateFlow("countdown")
     val timerType = _timerType.asStateFlow()
 
@@ -202,6 +214,12 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _activeScheme = MutableStateFlow("default")
     val activeScheme = _activeScheme.asStateFlow()
+
+    private val _activeProfile = MutableStateFlow("default")
+    val activeProfile = _activeProfile.asStateFlow()
+
+    private val _profileNames = MutableStateFlow(listOf("default", "novel"))
+    val profileNames = _profileNames.asStateFlow()
 
     // Cursor restore: set before currentFile changes so remember(path, wsActive) picks it up.
     private val _initialCursorOffset = MutableStateFlow(0)
@@ -299,9 +317,12 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _fontFamily.value = config.fontFamily
         _fontBold.value = config.fontBold
         _blockCursor.value = config.blockCursor
+        _spellCheckEnabled.value = config.spellCheckEnabled
         _darkModePreference.value = config.androidDarkMode
         _customSchemes.value = config.customSchemes
         _activeScheme.value = config.scheme
+        _activeProfile.value = config.activeProfile
+        _profileNames.value = config.profileNames
         _themeColors.value = config.themeColors(resolveUseDark())
         _hemingwayMode.value = config.hemingwayMode
         _lineNumbersEnabled.value = config.lineNumbers
@@ -480,6 +501,37 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 iniFile.writeText(IniParser.write(config))
             }
+        }
+    }
+
+    fun setSpellCheckEnabled(enabled: Boolean) {
+        config = config.copy(spellCheckEnabled = enabled)
+        _spellCheckEnabled.value = enabled
+        viewModelScope.launch(Dispatchers.IO) {
+            val iniFile = File(configDir, "writhdeck.ini")
+            if (iniFile.exists()) {
+                iniFile.writeText(IniParser.patchKeys(iniFile.readText(), "spell_check" to if (enabled) "yes" else "no"))
+            } else {
+                iniFile.writeText(IniParser.write(config))
+            }
+        }
+    }
+
+    /** Switch the active profile (`active_profile` in `[editor]`/`= editor =`). Unlike the
+     *  other setters, this re-derives the whole config from disk afterwards, since profile
+     *  sections (`= profile: <name> =`) override scheme/margins/word goal/etc. — the new
+     *  values can't be computed from the in-memory config alone. */
+    fun switchProfile(name: String) {
+        if (name == config.activeProfile) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val iniFile = File(configDir, "writhdeck.ini")
+            val text = if (iniFile.exists()) iniFile.readText() else IniParser.write(config)
+            val patched = IniParser.patchKeys(text, "active_profile" to name)
+            iniFile.writeText(patched)
+            config = IniParser.parse(patched)
+            applyConfig()
+            refreshDocs()
+            refreshStatus()
         }
     }
 
@@ -696,6 +748,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             _initialCursorOffset.value = 0
             _dirty.value = false
             _wordCount.value = countWords(text)
+            _pendingExternalOpen.value = true
         }
     }
 
@@ -975,7 +1028,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         lineSpacing      = config.lineSpacing,
         browserFilter    = config.browserFilter,
         browserShowAll   = config.browserShowAll,
-        docsCustomDir    = config.docsCustomDir
+        docsCustomDir    = config.docsCustomDir,
+        spellCheckEnabled = config.spellCheckEnabled
     )
 
     fun applySettings(s: SettingsData) {
@@ -1009,7 +1063,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             lineSpacing      = s.lineSpacing,
             browserFilter    = s.browserFilter,
             browserShowAll   = s.browserShowAll,
-            docsCustomDir    = s.docsCustomDir
+            docsCustomDir    = s.docsCustomDir,
+            spellCheckEnabled = s.spellCheckEnabled
         )
         applyConfig()
         refreshDocs()
@@ -1047,7 +1102,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 "line_spacing"      to s.lineSpacing.toString(),
                 "browser_filter"    to s.browserFilter,
                 "browser_show_all"  to b(s.browserShowAll),
-                "docs_dir"          to s.docsCustomDir
+                "docs_dir"          to s.docsCustomDir,
+                "spell_check"       to b(s.spellCheckEnabled)
             )
             text = IniParser.patchProfileKey(text, activeProfile, "scheme", s.scheme)
             // Ensure all built-in scheme sections are present (add missing ones)

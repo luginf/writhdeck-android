@@ -11,12 +11,21 @@ import android.text.Spannable
 import android.text.TextWatcher
 import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
+import android.text.style.SuggestionSpan
 import android.util.TypedValue
+import android.view.ActionMode
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.KeyEvent as AKeyEvent
+import android.view.Menu
+import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.inputmethod.EditorInfo
+import android.view.textservice.SentenceSuggestionsInfo
+import android.view.textservice.SpellCheckerSession
+import android.view.textservice.SuggestionsInfo
+import android.view.textservice.TextInfo
+import android.view.textservice.TextServicesManager
 import android.widget.EditText
 import android.widget.OverScroller
 import androidx.activity.compose.BackHandler
@@ -91,6 +100,12 @@ private class SearchBgSpan(color: Int) : BackgroundColorSpan(color)
 private class SearchCurrentBgSpan(color: Int) : BackgroundColorSpan(color)
 private class SearchCurrentFgSpan(color: Int) : ForegroundColorSpan(color)
 private class TypewriterDimSpan(color: Int) : ForegroundColorSpan(color)
+
+// Misspelled-word underline, applied by our own viewport-based spell-check pass
+// (see "Spell checking" below) — a thin wrapper so getSpans() can find/remove
+// only spans we added, regardless of suggestions content.
+private class SpellErrorSpan(context: Context, suggestions: Array<String>) :
+    SuggestionSpan(context, suggestions, FLAG_MISSPELLED)
 
 /** EditText with fling-based momentum scrolling.
  *
@@ -432,10 +447,28 @@ private val CMD_ACTIONS = listOf(
     's' to "stats", 'a' to "analyse", 'm' to "menu", 'c' to "settings", 'q' to "close"
 )
 
+private const val BASE_INPUT_TYPE = android.text.InputType.TYPE_CLASS_TEXT or
+    android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+    android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+
+// IDs for the formatting items added to the long-press / right-click text
+// context menu (mirrors the unified Tcl/web right-click menu: H1-3, comment,
+// bold/italic/underline/strike, spell check on/off — alongside the system's
+// own Cut/Copy/Paste/Select all).
+private const val MENU_ID_H1 = Menu.FIRST + 1
+private const val MENU_ID_H2 = Menu.FIRST + 2
+private const val MENU_ID_H3 = Menu.FIRST + 3
+private const val MENU_ID_COMMENT = Menu.FIRST + 4
+private const val MENU_ID_BOLD = Menu.FIRST + 5
+private const val MENU_ID_ITALIC = Menu.FIRST + 6
+private const val MENU_ID_UNDERLINE = Menu.FIRST + 7
+private const val MENU_ID_STRIKE = Menu.FIRST + 8
+private const val MENU_ID_SPELLCHECK = Menu.FIRST + 9
+
 private data class EditorStyle(
     val fgColor: Int, val fontSizeSp: Float, val lineSpacingMult: Float,
     val padX: Int, val padY: Int, val padBottom: Int, val writable: Boolean, val hemingway: Boolean,
-    val fontFamily: String, val fontBold: Boolean, val blockCursor: Boolean
+    val fontFamily: String, val fontBold: Boolean, val blockCursor: Boolean, val spellCheckEnabled: Boolean
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -467,6 +500,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val fontFamily by vm.fontFamily.collectAsStateWithLifecycle()
     val fontBold by vm.fontBold.collectAsStateWithLifecycle()
     val blockCursor by vm.blockCursor.collectAsStateWithLifecycle()
+    val spellCheckEnabled by vm.spellCheckEnabled.collectAsStateWithLifecycle()
     val lineSpacing by vm.lineSpacing.collectAsStateWithLifecycle()
     val hemingwayMode by vm.hemingwayMode.collectAsStateWithLifecycle()
     val lineNumbersEnabled by vm.lineNumbersEnabled.collectAsStateWithLifecycle()
@@ -551,9 +585,17 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val editorRef = remember { mutableStateOf<android.widget.EditText?>(null) }
     val ignoreTextChange = remember { booleanArrayOf(false) }
     val keyHandlerRef   = remember { arrayOf<(Int, AKeyEvent) -> Boolean>({ _, _ -> false }) }
+    // Long-press / right-click text context menu: populated in update{} with the
+    // current markers/settings so it reflects the latest Compose state.
+    val contextMenuCreateRef = remember { arrayOf<(Menu) -> Unit>({}) }
+    val contextMenuClickRef = remember { arrayOf<(Int) -> Boolean>({ false }) }
+    // Spell checking: bumped (debounced via LaunchedEffect's delay) whenever the
+    // editor scrolls, so newly-visible text gets checked too.
+    var spellCheckTick by remember { mutableIntStateOf(0) }
+    val spellCheckCookies = remember { arrayOf(IntArray(0)) }
     @Suppress("UNCHECKED_CAST")
     val originalKeyListener = remember { arrayOfNulls<android.text.method.KeyListener>(1) }
-    val lastStyle = remember { arrayOf(EditorStyle(0, 0f, 0f, -1, -1, -1, true, false, "", false, false)) }
+    val lastStyle = remember { arrayOf(EditorStyle(0, 0f, 0f, -1, -1, -1, true, false, "", false, false, true)) }
     val hemingwayFilter = remember {
         android.text.InputFilter { _, start, end, dest, dstart, dend ->
             if (dend - dstart > end - start) dest.subSequence(dstart, dend) else null
@@ -747,6 +789,92 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
             )
         }
         editorRef.value?.editableText?.let { applySyntaxSpansToEditable(it, spans) }
+    }
+
+    // Spell checking — Android's built-in EditText spellchecker only underlines text
+    // around recent edits, not pre-existing content loaded via setText(). We drive our
+    // own SpellCheckerSession instead, checking the visible lines (+ a small buffer)
+    // and applying SuggestionSpan(FLAG_MISSPELLED) ourselves — same red squiggly the
+    // system uses, but covering old and new text alike. Mirrors the Tcl/web
+    // viewport-only `spell_highlight`.
+    val spellCheckerSession = remember { arrayOfNulls<SpellCheckerSession>(1) }
+    DisposableEffect(Unit) {
+        val tsm = context.getSystemService(Context.TEXT_SERVICES_MANAGER_SERVICE) as TextServicesManager
+        val listener = object : SpellCheckerSession.SpellCheckerSessionListener {
+            override fun onGetSuggestions(results: Array<out SuggestionsInfo>?) {}
+            override fun onGetSentenceSuggestions(results: Array<out SentenceSuggestionsInfo>?) {
+                if (results == null) return
+                val editable = editorRef.value?.editableText ?: return
+                val cookies = spellCheckCookies[0]
+                for (i in results.indices) {
+                    val result = results[i] ?: continue
+                    val base = cookies.getOrNull(i) ?: continue
+                    for (j in 0 until result.suggestionsCount) {
+                        val info = result.getSuggestionsInfoAt(j)
+                        if ((info.suggestionsAttributes and SuggestionsInfo.RESULT_ATTR_LOOKS_LIKE_TYPO) == 0) continue
+                        val start = (base + result.getOffsetAt(j)).coerceIn(0, editable.length)
+                        val end = (start + result.getLengthAt(j)).coerceIn(0, editable.length)
+                        if (start >= end) continue
+                        val suggestions = (0 until info.suggestionsCount).map { info.getSuggestionAt(it) }.toTypedArray()
+                        editable.setSpan(SpellErrorSpan(context, suggestions), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    }
+                }
+            }
+        }
+        spellCheckerSession[0] = tsm.newSpellCheckerSession(null, null, listener, true)
+        onDispose { spellCheckerSession[0]?.close(); spellCheckerSession[0] = null }
+    }
+
+    LaunchedEffect(content, spellCheckEnabled, spellCheckTick, currentFile?.path, wsActive) {
+        val editable = editorRef.value?.editableText ?: return@LaunchedEffect
+        if (!spellCheckEnabled) {
+            editable.getSpans(0, editable.length, SpellErrorSpan::class.java).forEach { editable.removeSpan(it) }
+            return@LaunchedEffect
+        }
+        val session = spellCheckerSession[0] ?: return@LaunchedEffect
+        val snap = content
+        delay(400)
+        if (content != snap) return@LaunchedEffect
+
+        var layout = editorRef.value?.layout
+        var attempts = 0
+        while (layout == null && attempts < 10) {
+            delay(50)
+            layout = editorRef.value?.layout
+            attempts++
+        }
+        val et = editorRef.value ?: return@LaunchedEffect
+        layout ?: return@LaunchedEffect
+
+        val buffer = 5
+        val firstVisible = layout.getLineForVertical(et.scrollY)
+        val lastVisible = layout.getLineForVertical(et.scrollY + et.height)
+        val startLine = (firstVisible - buffer).coerceAtLeast(0)
+        val endLine = (lastVisible + buffer).coerceAtMost(layout.lineCount - 1)
+        if (startLine > endLine) return@LaunchedEffect
+        val startOffset = layout.getLineStart(startLine)
+        val endOffset = layout.getLineEnd(endLine).coerceAtMost(snap.length)
+        if (startOffset >= endOffset) return@LaunchedEffect
+
+        editable.getSpans(startOffset, endOffset, SpellErrorSpan::class.java).forEach { editable.removeSpan(it) }
+
+        val infos = mutableListOf<TextInfo>()
+        val cookies = mutableListOf<Int>()
+        var pos = startOffset
+        while (pos < endOffset) {
+            val nl = snap.indexOf('\n', pos).let { if (it < 0 || it > endOffset) endOffset else it }
+            if (nl > pos) {
+                val line = snap.substring(pos, nl)
+                if (line.any { it.isLetter() }) {
+                    infos.add(TextInfo(line, 0, line.length, infos.size, infos.size))
+                    cookies.add(pos)
+                }
+            }
+            pos = nl + 1
+        }
+        if (infos.isEmpty()) return@LaunchedEffect
+        spellCheckCookies[0] = cookies.toIntArray()
+        session.getSentenceSuggestions(infos.toTypedArray(), 3)
     }
 
     // Typewriter mode — re-dim paragraphs and re-centre on text changes / mode toggle.
@@ -1046,8 +1174,9 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         // The menu can be taller than the screen (anchored near the top, near a
         // long item list) — without trailing space, "Settings" lands flush against
         // the bottom edge and the scrollable area ends right at it, making it hard
-        // to reach/tap. An empty disabled item gives the scroll room to bring
+        // to reach/tap. Empty disabled items give the scroll room to bring
         // "Settings" clear of the edge.
+        DropdownMenuItem(text = { Text("") }, onClick = {}, enabled = false)
         DropdownMenuItem(text = { Text("") }, onClick = {}, enabled = false)
     }
 
@@ -1183,9 +1312,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
             AndroidView(
                 factory = { ctx ->
                     FlingEditText(ctx).apply {
-                        inputType = android.text.InputType.TYPE_CLASS_TEXT or
-                            android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
-                            android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                        inputType = BASE_INPUT_TYPE
                         imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN
                         typeface = Typeface.create(fontFamily, if (fontBold) Typeface.BOLD else Typeface.NORMAL)
                         gravity = Gravity.TOP or Gravity.START
@@ -1208,8 +1335,32 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
 
                         setOnKeyListener { _, keyCode, event -> keyHandlerRef[0](keyCode, event) }
 
-                        // Keep the line-numbers gutter's scroll position in sync with the editor.
-                        setOnScrollChangeListener { _, _, scrollY, _, _ -> gutterRef.value?.scrollTo(0, scrollY) }
+                        // Keep the line-numbers gutter's scroll position in sync with the editor,
+                        // and re-check spelling for newly-visible lines.
+                        setOnScrollChangeListener { _, _, scrollY, _, _ ->
+                            gutterRef.value?.scrollTo(0, scrollY)
+                            spellCheckTick++
+                        }
+
+                        // Long-press (or right-click) text menu: the system pre-populates `menu`
+                        // with Cut/Copy/Paste/Select all/etc. before onCreateActionMode is called —
+                        // we only add formatting items on top. onActionItemClicked is tried first
+                        // for our custom IDs; returning false lets the system handle its own items.
+                        val contextMenuCallback = object : ActionMode.Callback {
+                            override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+                                contextMenuCreateRef[0](menu)
+                                return true
+                            }
+                            override fun onPrepareActionMode(mode: ActionMode, menu: Menu) = false
+                            override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+                                val handled = contextMenuClickRef[0](item.itemId)
+                                if (handled) mode.finish()
+                                return handled
+                            }
+                            override fun onDestroyActionMode(mode: ActionMode) {}
+                        }
+                        customSelectionActionModeCallback = contextMenuCallback
+                        customInsertionActionModeCallback = contextMenuCallback
                     }.also { editorRef.value = it }
                 },
                 update = { editText ->
@@ -1226,7 +1377,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     val newStyle = EditorStyle(editorFgInt, fontSize.toFloat(), lineSpacing,
                                                effMarginWidthPx, effMarginHeightPx, effMarginHeightPx + extraBottomPadPx,
                                                fileWritable, hemingwayActive,
-                                               fontFamily, fontBold, blockCursor)
+                                               fontFamily, fontBold, blockCursor, spellCheckEnabled)
                     if (lastStyle[0] != newStyle) {
                         editText.setTextColor(newStyle.fgColor)
                         if (newStyle.fontFamily != lastStyle[0].fontFamily || newStyle.fontBold != lastStyle[0].fontBold) {
@@ -1236,6 +1387,10 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                         editText.setTextSize(TypedValue.COMPLEX_UNIT_SP, newStyle.fontSizeSp)
                         editText.setLineSpacing(0f, newStyle.lineSpacingMult)
                         editText.setPadding(newStyle.padX, newStyle.padY, newStyle.padX, newStyle.padBottom)
+                        if (newStyle.spellCheckEnabled != lastStyle[0].spellCheckEnabled) {
+                            editText.inputType = if (newStyle.spellCheckEnabled) BASE_INPUT_TYPE
+                                else BASE_INPUT_TYPE or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                        }
                         editText.keyListener = if (newStyle.writable) originalKeyListener[0] else null
                         editText.filters = if (newStyle.hemingway && newStyle.writable)
                             arrayOf(hemingwayFilter) else emptyArray()
@@ -1253,6 +1408,46 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                             } else null
                         }
                         lastStyle[0] = newStyle
+                    }
+
+                    // Long-press / right-click text menu — formatting items mirror the "≡"
+                    // menu's Format section (markers configurable in Settings > Display).
+                    contextMenuCreateRef[0] = { menu ->
+                        menu.add(Menu.NONE, MENU_ID_SPELLCHECK, 100,
+                            "Spell check: ${if (spellCheckEnabled) "on" else "off"}")
+                        if (headingMarker.isNotEmpty()) {
+                            menu.add(Menu.NONE, MENU_ID_H1, 101, "H1")
+                            menu.add(Menu.NONE, MENU_ID_H2, 102, "H2")
+                            menu.add(Menu.NONE, MENU_ID_H3, 103, "H3")
+                        }
+                        if (commentMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_COMMENT, 104, "Comment")
+                        if (boldMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_BOLD, 105, "Bold")
+                        if (italicMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_ITALIC, 106, "Italic")
+                        if (underlineMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_UNDERLINE, 107, "Underline")
+                        if (strikethroughMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_STRIKE, 108, "Strike")
+                    }
+                    contextMenuClickRef[0] = clickHandler@{ itemId ->
+                        val et = editorRef.value ?: return@clickHandler false
+                        when (itemId) {
+                            MENU_ID_SPELLCHECK -> { vm.setSpellCheckEnabled(!spellCheckEnabled); true }
+                            MENU_ID_H1 -> { applyEditResult(applyHeadingLevel(
+                                et.text.toString(), et.selectionStart, et.selectionEnd, headingMarker, 1)); true }
+                            MENU_ID_H2 -> { applyEditResult(applyHeadingLevel(
+                                et.text.toString(), et.selectionStart, et.selectionEnd, headingMarker, 2)); true }
+                            MENU_ID_H3 -> { applyEditResult(applyHeadingLevel(
+                                et.text.toString(), et.selectionStart, et.selectionEnd, headingMarker, 3)); true }
+                            MENU_ID_COMMENT -> { applyEditResult(applyLineMarkerResult(
+                                et.text.toString(), et.selectionStart, et.selectionEnd, commentMarker)); true }
+                            MENU_ID_BOLD -> { applyEditResult(applyInlineMarkerResult(
+                                et.text.toString(), et.selectionStart, et.selectionEnd, boldMarker)); true }
+                            MENU_ID_ITALIC -> { applyEditResult(applyInlineMarkerResult(
+                                et.text.toString(), et.selectionStart, et.selectionEnd, italicMarker)); true }
+                            MENU_ID_UNDERLINE -> { applyEditResult(applyInlineMarkerResult(
+                                et.text.toString(), et.selectionStart, et.selectionEnd, underlineMarker)); true }
+                            MENU_ID_STRIKE -> { applyEditResult(applyInlineMarkerResult(
+                                et.text.toString(), et.selectionStart, et.selectionEnd, strikethroughMarker)); true }
+                            else -> false
+                        }
                     }
 
                     // Update key handler with current compose state values

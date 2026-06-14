@@ -34,7 +34,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        handleIntent(intent)
+        // Only process the launch intent on a fresh start, not on recreation
+        // (e.g. rotation) — otherwise an externally-opened file would be
+        // re-read from disk on every rotation, discarding in-memory edits.
+        if (savedInstanceState == null) handleIntent(intent)
         setContent {
             val darkPref by vm.darkModePreference.collectAsState()
             val systemDark = isSystemInDarkTheme()

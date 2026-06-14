@@ -13,12 +13,18 @@ import com.writhdeck.app.WrithdeckViewModel
 @Composable
 fun AppNavigation(vm: WrithdeckViewModel = viewModel(), onRequestPermission: () -> Unit = {}) {
     val nav = rememberNavController()
-    val currentFile by vm.currentFile.collectAsStateWithLifecycle()
+    val pendingExternalOpen by vm.pendingExternalOpen.collectAsStateWithLifecycle()
 
-    // If MainActivity already loaded an external file, go straight to the editor
-    LaunchedEffect(currentFile) {
-        if (currentFile != null && nav.currentDestination?.route == "browser") {
-            nav.navigate("editor") { launchSingleTop = true }
+    // If MainActivity just loaded an external file (Intent VIEW/EDIT), go straight
+    // to the editor. This is a one-shot signal consumed immediately so it doesn't
+    // re-fire on later recompositions (e.g. on rotation, after the user has since
+    // closed that document and returned to the browser).
+    LaunchedEffect(pendingExternalOpen) {
+        if (pendingExternalOpen) {
+            vm.consumeExternalOpen()
+            if (nav.currentDestination?.route == "browser") {
+                nav.navigate("editor") { launchSingleTop = true }
+            }
         }
     }
 

@@ -80,6 +80,7 @@ data class AppConfig(
     val keyCmdMode: String = "Escape",
     val docsCustomDir: String = "",
     val activeProfile: String = "default",
+    val profileNames: List<String> = listOf("default", "novel"),
     val customSchemes: Map<String, SchemeColors> = emptyMap(),
     val fontSize: Int = 16,
     val fontFamily: String = "monospace",
@@ -94,7 +95,8 @@ data class AppConfig(
     val lineNumbers: Boolean = false,
     val lineSpacing: Float = 1.5f,
     val browserFilter: String = "*.txt *.t2t *.md *.ini",
-    val browserShowAll: Boolean = false
+    val browserShowAll: Boolean = false,
+    val spellCheckEnabled: Boolean = true
 ) {
     /** True if [filename] passes [browserFilter] (or [browserShowAll] bypasses it).
      *  Mirrors the Tcl desktop's `list-docs` filtering: an empty filter or
@@ -208,6 +210,7 @@ object IniParser {
             keyCmdMode       = str("key_cmd_mode", "Escape"),
             docsCustomDir    = keys["docs_dir"] ?: "",
             activeProfile    = activeProfile,
+            profileNames     = (profiles.keys + activeProfile).toSortedSet().toList(),
             customSchemes    = customSchemes,
             fontSize         = int("font_size", 16).coerceIn(10, 32),
             fontFamily       = str("font_family", "monospace").let {
@@ -225,7 +228,8 @@ object IniParser {
             lineSpacing      = keys["line_spacing"]?.toFloatOrNull()?.coerceIn(0.8f, 3.0f) ?: 1.5f,
             // Not via str(): an empty filter is a valid "show all" state, distinct from default
             browserFilter    = keys["browser_filter"] ?: "*.txt *.t2t *.md *.ini",
-            browserShowAll   = bool("browser_show_all", false)
+            browserShowAll   = bool("browser_show_all", false),
+            spellCheckEnabled = bool("spell_check", true)
         )
     }
 

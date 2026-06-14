@@ -26,6 +26,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -51,9 +52,14 @@ fun SettingsScreen(
     onNavigateSchemes: () -> Unit = {}
 ) {
     val activeScheme by vm.activeScheme.collectAsStateWithLifecycle()
-    // Re-read when activeScheme changes (e.g., user picked a scheme in SchemeConfigScreen and came back)
-    var s by remember(activeScheme) { mutableStateOf(vm.getSettingsData()) }
+    val activeProfile by vm.activeProfile.collectAsStateWithLifecycle()
+    val profileNames by vm.profileNames.collectAsStateWithLifecycle()
+    // Re-read when activeScheme/activeProfile changes (e.g., user picked a scheme in
+    // SchemeConfigScreen and came back, or switched profile — profile sections override
+    // margins/word goal/scheme/etc., so the whole settings snapshot must be refreshed)
+    var s by remember(activeScheme, activeProfile) { mutableStateOf(vm.getSettingsData()) }
     var selectedTab by remember { mutableIntStateOf(0) }
+    val density = LocalDensity.current
 
     Scaffold(
         topBar = {
@@ -72,6 +78,12 @@ fun SettingsScreen(
             )
         }
     ) { padding ->
+        // Same fix as EditorScreen: Scaffold's content Box doesn't shrink for the IME, so
+        // add extra bottom padding equal to the keyboard's overlap with this Box, letting
+        // the scrollable settings list be scrolled clear of the keyboard.
+        val extraBottomPadPx = (WindowInsets.ime.getBottom(density) -
+            with(density) { padding.calculateBottomPadding().roundToPx() }).coerceAtLeast(0)
+        val extraBottomPad = with(density) { extraBottomPadPx.toDp() }
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
             ScrollableTabRow(selectedTabIndex = selectedTab, edgePadding = 8.dp) {
                 SETTINGS_TABS.forEachIndexed { i, label ->
@@ -86,10 +98,10 @@ fun SettingsScreen(
                 modifier = Modifier
                     .weight(1f)
                     .verticalScroll(rememberScrollState())
-                    .padding(bottom = 32.dp)
+                    .padding(bottom = 32.dp + extraBottomPad)
             ) {
                 when (selectedTab) {
-                    0 -> ProfileTab(s) { s = it }
+                    0 -> ProfileTab(s, activeProfile, profileNames, onSwitchProfile = vm::switchProfile) { s = it }
                     1 -> DisplayTab(s) { s = it }
                     2 -> FontsTab(s) { s = it }
                     3 -> SchemesTab(s, vm, onNavigateSchemes = { vm.applySettings(s); onNavigateSchemes() }) { s = it }
@@ -102,7 +114,17 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun ProfileTab(s: SettingsData, onChange: (SettingsData) -> Unit) {
+private fun ProfileTab(
+    s: SettingsData,
+    activeProfile: String,
+    profileNames: List<String>,
+    onSwitchProfile: (String) -> Unit,
+    onChange: (SettingsData) -> Unit
+) {
+    SettingsSection("Active profile")
+    DropdownSettingRow("Profile", activeProfile, profileNames, onChange = onSwitchProfile)
+
+    SettingsSection("Profile settings")
     IntSettingRow("Margin width", s.marginWidth, 0, 200) { onChange(s.copy(marginWidth = it)) }
     IntSettingRow("Margin height", s.marginHeight, 0, 200) { onChange(s.copy(marginHeight = it)) }
     IntSettingRow("Word goal", s.wordGoal, 0, 99999) { onChange(s.copy(wordGoal = it)) }
@@ -120,6 +142,7 @@ private fun DisplayTab(s: SettingsData, onChange: (SettingsData) -> Unit) {
     StringSettingRow("Heading marker", s.headingMarker) { onChange(s.copy(headingMarker = it)) }
     SwitchSettingRow("Markdown headings (#)", s.markdownHeadings) { onChange(s.copy(markdownHeadings = it)) }
     SwitchSettingRow("Block cursor", s.blockCursor) { onChange(s.copy(blockCursor = it)) }
+    SwitchSettingRow("Spell check", s.spellCheckEnabled) { onChange(s.copy(spellCheckEnabled = it)) }
 
     SettingsSection("Markup")
     StringSettingRow("Comment marker", s.commentMarker) { onChange(s.copy(commentMarker = it)) }
