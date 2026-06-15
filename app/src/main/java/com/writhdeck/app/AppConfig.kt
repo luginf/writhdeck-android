@@ -1,5 +1,7 @@
 package com.writhdeck.app
 
+import kotlin.math.roundToInt
+
 /** Editor font choice: a display label paired with an Android generic font-family alias.
  *  These aliases are resolved by `Typeface.create(familyName, style)` against the system's
  *  `fonts.xml` — no font files need to be embedded in the APK. */
@@ -96,7 +98,11 @@ data class AppConfig(
     val lineSpacing: Float = 1.5f,
     val browserFilter: String = "*.txt *.t2t *.md *.ini",
     val browserShowAll: Boolean = false,
-    val spellCheckEnabled: Boolean = true
+    val spellCheckEnabled: Boolean = true,
+    // "system" = let the spell checker service pick its own language (matches the
+    // active keyboard/locale); otherwise an explicit BCP-47 tag (e.g. "en-US", "fr-FR")
+    // from one of the spell checker's enabled subtypes.
+    val spellCheckLanguage: String = "system"
 ) {
     /** True if [filename] passes [browserFilter] (or [browserShowAll] bypasses it).
      *  Mirrors the Tcl desktop's `list-docs` filtering: an empty filter or
@@ -123,29 +129,201 @@ data class AppConfig(
 
 object IniParser {
 
-    fun parse(text: String): AppConfig {
+    /** Top-level section names — disambiguates a `[name]` header seen while inside
+     *  `[profiles]`/`[schemes]`: if `name` is one of these, it ends the profiles/schemes
+     *  block (a real top-level section) rather than naming a profile/scheme. Union of the
+     *  Tcl and web `TOPLEVEL` sets, for cross-version compatibility. */
+    private val TOPLEVEL_SECTIONS = setOf(
+        "editor", "behaviour", "keys", "timer", "misc", "status_bar",
+        "display", "web", "tui_colors"
+    )
+
+    private val SECTION_RE = Regex("^\\[(\\w+)\\]$")
+
+    /** Keys that moved from global scope to per-profile scope (`[profiles] -> [<name>]`),
+     *  aligning Android with the Tcl desktop's profile model (font, line spacing, line
+     *  numbers, dark mode and block cursor are all per-profile there too). Used by
+     *  [migrateProfileScopedKeys] to migrate existing `.ini` files written by older
+     *  versions of [write], which had these keys in `[behaviour]`/`[misc]`. */
+    private val PROFILE_SCOPED_KEYS = setOf(
+        "font_size", "font_family", "line_spacing", "line_numbers", "android_dark_mode", "block_cursor"
+    )
+
+    /** `line_spacing` uses incompatible units across versions: the Tcl desktop stores a
+     *  percentage (100 = normal line height; `extra_px = lineHeight*(v-100)/100`), while
+     *  Android/web store a `setLineSpacing`/CSS `line-height` multiplier (default 1.5).
+     *  The two conventions differ by a factor of 100. INI values >= 10 are assumed to use
+     *  the percentage convention (Tcl, or an already-migrated Android/web file) and are
+     *  divided by 100; smaller values are pre-conversion Android/web files and are used
+     *  as-is. [write]/[lineSpacingToIni] always emit the percentage convention going
+     *  forward, so a stale value self-heals on the next save. */
+    fun lineSpacingFromIni(raw: Float): Float = if (raw >= 10f) raw / 100f else raw
+    fun lineSpacingToIni(value: Float): Int = (value * 100f).roundToInt()
+
+    /** One-time migration from the legacy Android `.ini` dialect — where `= profile: <name> =`
+     *  / `= scheme: <name> =` lines were the REAL section markers and `active_profile`
+     *  selected the active profile — to the `[section]`-bracket dialect shared with the Tcl
+     *  and web versions: `[profiles]`/`[schemes]` containers holding named `[<name>]`
+     *  sub-sections, and `profile = <name>` inside `[editor]`. Returns [text] unchanged if no
+     *  legacy markers are found. Called from `parse()` and once from `initApp()` (which
+     *  persists the migrated text to disk so later `patchKeys`/`patchProfileKey`/etc. calls
+     *  only ever see the new dialect). */
+    fun migrateLegacyFormat(text: String): String {
+        val legacyHeader = Regex("^=\\s*(profile|scheme):\\s*(\\w+)\\s*=$")
+        if (text.lines().none { legacyHeader.matches(it.trim()) }) return text
+
+        val result = mutableListOf<String>()
+        var profilesInserted = false
+        var schemesInserted = false
+        for (raw in text.lines()) {
+            val trimmed = raw.trim()
+            val m = legacyHeader.find(trimmed)
+            if (m != null) {
+                val (kind, name) = m.destructured
+                if (kind == "profile" && !profilesInserted) {
+                    result.add("[profiles]"); result.add(""); profilesInserted = true
+                }
+                if (kind == "scheme" && !schemesInserted) {
+                    result.add("[schemes]"); result.add(""); schemesInserted = true
+                }
+                result.add("[$name]")
+                continue
+            }
+            val activeProfileKey = Regex("^(\\s*)active_profile(\\s*=.*)$").find(raw)
+            if (activeProfileKey != null) {
+                result.add("${activeProfileKey.groupValues[1]}profile${activeProfileKey.groupValues[2]}")
+                continue
+            }
+            result.add(raw)
+        }
+        return result.joinToString("\n").trimEnd() + "\n"
+    }
+
+    /** One-time migration for keys in [PROFILE_SCOPED_KEYS]: these used to be global
+     *  settings (`[behaviour]`/`[misc]`) but are now per-profile (`[profiles] -> [<name>]`),
+     *  matching the Tcl desktop. If any of these keys is found at global scope, its value is
+     *  copied into every `[profiles] -> [<name>]` sub-section that doesn't already define it,
+     *  and the global line is removed. Returns [text] unchanged if none of these keys exist
+     *  at global scope (fresh installs, or files already migrated). Assumes [text] is already
+     *  in the `[section]`-bracket dialect (call after [migrateLegacyFormat]). */
+    fun migrateProfileScopedKeys(text: String): String {
+        var section: String? = null
+        var currentProfile: String? = null
+        val globalValues = mutableMapOf<String, String>()
+        val profileNames = mutableListOf<String>()
+        val profileHasKey = mutableMapOf<String, MutableSet<String>>()
+
+        for (raw in text.lines()) {
+            val line = raw.trim()
+            if (line.startsWith("#") || line.startsWith("%") || line.isEmpty()) continue
+            if (line.startsWith("=") && line.endsWith("=") && line.length > 2) continue
+
+            val secMatch = SECTION_RE.find(line)
+            if (secMatch != null) {
+                val hdr = secMatch.groupValues[1]
+                when {
+                    hdr == "schemes" -> { section = "schemes"; currentProfile = null }
+                    hdr == "profiles" -> { section = "profiles"; currentProfile = null }
+                    section == "profiles" && hdr !in TOPLEVEL_SECTIONS -> {
+                        currentProfile = hdr
+                        profileNames.add(hdr)
+                    }
+                    section == "schemes" && hdr !in TOPLEVEL_SECTIONS -> currentProfile = null
+                    else -> { section = hdr; currentProfile = null }
+                }
+                continue
+            }
+
+            val eq = line.indexOf('=')
+            if (eq < 0) continue
+            val key = line.substring(0, eq).trim()
+            if (key !in PROFILE_SCOPED_KEYS) continue
+            val value = line.substring(eq + 1).trim().replace(Regex("\\s+[#%].*$"), "")
+            if (currentProfile != null) {
+                profileHasKey.getOrPut(currentProfile!!) { mutableSetOf() }.add(key)
+            } else if (section != "schemes") {
+                globalValues[key] = value
+            }
+        }
+
+        if (globalValues.isEmpty()) return text
+
+        // Pass 2: drop the global lines for migrated keys.
+        section = null
+        currentProfile = null
+        val withoutGlobals = mutableListOf<String>()
+        for (raw in text.lines()) {
+            val line = raw.trim()
+            val isCosmetic = line.startsWith("#") || line.startsWith("%") || line.isEmpty() ||
+                (line.startsWith("=") && line.endsWith("=") && line.length > 2)
+            if (!isCosmetic) {
+                val secMatch = SECTION_RE.find(line)
+                if (secMatch != null) {
+                    val hdr = secMatch.groupValues[1]
+                    when {
+                        hdr == "schemes" -> { section = "schemes"; currentProfile = null }
+                        hdr == "profiles" -> { section = "profiles"; currentProfile = null }
+                        section == "profiles" && hdr !in TOPLEVEL_SECTIONS -> currentProfile = hdr
+                        section == "schemes" && hdr !in TOPLEVEL_SECTIONS -> currentProfile = null
+                        else -> { section = hdr; currentProfile = null }
+                    }
+                } else {
+                    val eq = line.indexOf('=')
+                    if (eq > 0) {
+                        val key = line.substring(0, eq).trim()
+                        if (key in PROFILE_SCOPED_KEYS && currentProfile == null && section != "schemes") {
+                            continue
+                        }
+                    }
+                }
+            }
+            withoutGlobals.add(raw)
+        }
+
+        var out = withoutGlobals.joinToString("\n").trimEnd() + "\n"
+        for (name in profileNames) {
+            for ((key, value) in globalValues) {
+                if (key !in (profileHasKey[name] ?: emptySet())) {
+                    out = patchProfileKey(out, name, key, value)
+                }
+            }
+        }
+        return out
+    }
+
+    fun parse(rawText: String): AppConfig {
+        val text = migrateProfileScopedKeys(migrateLegacyFormat(rawText))
         val global = mutableMapOf<String, String>()
         val profiles = mutableMapOf<String, MutableMap<String, String>>()
         val schemes = mutableMapOf<String, MutableMap<String, String>>()
+        var section: String? = null
         var currentProfile: String? = null
         var currentScheme: String? = null
 
         for (raw in text.lines()) {
             val line = raw.trim()
             if (line.startsWith("#") || line.startsWith("%") || line.isEmpty()) continue
-            // WrithDeck section header:  = title =
-            if (line.startsWith("=") && line.endsWith("=") && line.length > 2) {
-                val title = line.trim('=').trim()
-                currentProfile = if (title.startsWith("profile:")) title.removePrefix("profile:").trim() else null
-                currentScheme  = if (title.startsWith("scheme:"))  title.removePrefix("scheme:").trim()  else null
+            // `= title =` decorative headings (written by the Tcl/web versions for the F11
+            // TOC) are purely cosmetic — they match neither [section] nor key = value.
+            if (line.startsWith("=") && line.endsWith("=") && line.length > 2) continue
+
+            // [section] header — [profiles]/[schemes] are containers; a [name] header seen
+            // while inside one of those (and not itself a top-level section name) starts a
+            // named profile/scheme sub-section. Any other [section] is a top-level section
+            // (parsing of its keys is section-agnostic, same as Tcl/JS).
+            val secMatch = SECTION_RE.find(line)
+            if (secMatch != null) {
+                val hdr = secMatch.groupValues[1]
+                when {
+                    hdr == "schemes" -> { section = "schemes"; currentScheme = null; currentProfile = null }
+                    hdr == "profiles" -> { section = "profiles"; currentProfile = null; currentScheme = null }
+                    section == "schemes" && hdr !in TOPLEVEL_SECTIONS -> currentScheme = hdr
+                    section == "profiles" && hdr !in TOPLEVEL_SECTIONS -> currentProfile = hdr
+                    else -> { section = hdr; currentScheme = null; currentProfile = null }
+                }
                 continue
             }
-            // Standard INI section header: [section]
-            if (line.startsWith("[") && line.endsWith("]")) {
-                currentProfile = null
-                currentScheme  = null
-                continue
-            }
+
             val eq = line.indexOf('=')
             if (eq < 0) continue
             val key = line.substring(0, eq).trim()
@@ -160,7 +338,7 @@ object IniParser {
             }
         }
 
-        val activeProfile = global["active_profile"]?.takeIf { it.isNotBlank() } ?: "default"
+        val activeProfile = global["profile"]?.takeIf { it.isNotBlank() } ?: "default"
         val keys = global.toMutableMap().also { it.putAll(profiles[activeProfile] ?: emptyMap()) }
 
         fun bool(k: String, def: Boolean): Boolean {
@@ -225,11 +403,12 @@ object IniParser {
             statusRight      = str("status_right",  "timer"),
             hemingwayMode    = bool("hemingway_mode", false),
             lineNumbers      = bool("line_numbers", false),
-            lineSpacing      = keys["line_spacing"]?.toFloatOrNull()?.coerceIn(0.8f, 3.0f) ?: 1.5f,
+            lineSpacing      = (keys["line_spacing"]?.toFloatOrNull()?.let(::lineSpacingFromIni) ?: 1.5f).coerceIn(0.8f, 3.0f),
             // Not via str(): an empty filter is a valid "show all" state, distinct from default
             browserFilter    = keys["browser_filter"] ?: "*.txt *.t2t *.md *.ini",
             browserShowAll   = bool("browser_show_all", false),
-            spellCheckEnabled = bool("spell_check", true)
+            spellCheckEnabled = bool("spell_check", true),
+            spellCheckLanguage = str("spell_check_language", "system")
         )
     }
 
@@ -239,39 +418,38 @@ object IniParser {
             appendLine("% WrithDeck — configuration")
             appendLine("% Schemes: default solarized gruvbox everforest nord alt01 alt02 retro")
             appendLine()
-            appendLine("= editor =")
-            appendLine("active_profile = ${config.activeProfile}")
+            appendLine("[editor]")
+            appendLine("profile = ${config.activeProfile}")
             appendLine()
-            appendLine("= behaviour =")
+            appendLine("[behaviour]")
             appendLine("cursor_restore = yes")
             appendLine("autosave_enabled = yes")
             appendLine("autosave_interval = 1")
             appendLine("hemingway_mode = ${bool(config.hemingwayMode)}")
-            appendLine("line_numbers = ${bool(config.lineNumbers)}")
-            appendLine("line_spacing = ${config.lineSpacing}")
             appendLine("% browser_filter: space-separated glob patterns (* ? [...]) for the browser file list")
             appendLine("browser_filter = ${config.browserFilter}")
             appendLine("% browser_show_all: bypass browser_filter and show all files")
             appendLine("browser_show_all = ${bool(config.browserShowAll)}")
             appendLine()
-            appendLine("= status_bar =")
+            appendLine("[status_bar]")
             appendLine("status_left = ${config.statusLeft}")
             appendLine("status_center = ${config.statusCenter}")
             appendLine("status_right = ${config.statusRight}")
             appendLine()
-            appendLine("= timer =")
+            appendLine("[timer]")
             appendLine("timer_type = ${config.timerType}")
             appendLine("timer_duration = ${config.timerDuration}")
             appendLine("timer_sound = ${bool(config.timerSound)}")
             appendLine("timer_alert = ${bool(config.timerAlert)}")
             appendLine("chrono_show = ${bool(config.chronoShow)}")
             appendLine()
-            appendLine("= misc =")
-            appendLine("android_dark_mode = ${config.androidDarkMode}")
+            appendLine("[misc]")
             appendLine("% docs_dir: optional absolute path to a custom documents folder; empty = default")
             appendLine("docs_dir = ${config.docsCustomDir}")
+            appendLine("spell_check = ${bool(config.spellCheckEnabled)}")
+            appendLine("spell_check_language = ${config.spellCheckLanguage}")
             appendLine()
-            appendLine("= keys =")
+            appendLine("[keys]")
             appendLine("% Use Tk key names: Control-s, Alt-Return, F11, etc.")
             appendLine("key_save = ${config.keySave}")
             appendLine("key_find = ${config.keyFind}")
@@ -283,23 +461,37 @@ object IniParser {
             appendLine("key_line_numbers = ${config.keyLineNumbers}")
             appendLine("key_cmd_mode = ${config.keyCmdMode}")
             appendLine()
-            appendLine("= profiles =")
+            appendLine("[profiles]")
             appendLine()
-            appendLine("= profile: default =")
+            appendLine("[default]")
             appendLine("scheme = default")
             appendLine("heading_marker = =")
             appendLine("markdown_headings = yes")
             appendLine("margin_width = 16")
             appendLine("margin_height = 16")
             appendLine("word_goal = 0")
+            appendLine("font_size = 16")
+            appendLine("font_family = monospace")
+            appendLine("line_spacing = ${lineSpacingToIni(1.5f)}")
+            appendLine("line_numbers = no")
+            appendLine("android_dark_mode = auto")
+            appendLine("block_cursor = no")
             appendLine()
-            appendLine("= profile: novel =")
+            appendLine("[novel]")
             appendLine("scheme = everforest")
             appendLine("heading_marker = =")
             appendLine("markdown_headings = no")
             appendLine("margin_width = 32")
             appendLine("margin_height = 24")
             appendLine("word_goal = 1000")
+            appendLine("font_size = 18")
+            appendLine("font_family = serif")
+            appendLine("line_spacing = ${lineSpacingToIni(1.8f)}")
+            appendLine("line_numbers = no")
+            appendLine("android_dark_mode = auto")
+            appendLine("block_cursor = no")
+            appendLine()
+            appendLine("[schemes]")
         } + BUILTIN_SCHEMES.entries.joinToString("") { (name, colors) ->
             schemeToIniSection(name, colors) + "\n"
         } + config.customSchemes.entries
@@ -313,20 +505,12 @@ object IniParser {
         val found = mutableSetOf<String>()
         val lines = text.lines()
 
-        // Missing global keys must be inserted before the first `= profile: ... =` /
-        // `= scheme: ... =` section — appending at the very end would land inside the
-        // last scheme section and get silently parsed away as a scheme color key.
-        var boundaryIdx = lines.size
-        for ((idx, raw) in lines.withIndex()) {
-            val trimmed = raw.trim()
-            if (trimmed.startsWith("=") && trimmed.endsWith("=") && trimmed.length > 2) {
-                val title = trimmed.trim('=').trim()
-                if (title.startsWith("profile:") || title.startsWith("scheme:")) {
-                    boundaryIdx = idx
-                    break
-                }
-            }
-        }
+        // Missing global keys must be inserted before [profiles] (or [schemes] if there's
+        // no [profiles]) — appending at the very end would land inside the last scheme's
+        // [name] sub-section and get silently parsed away as a scheme color key.
+        var boundaryIdx = lines.indexOfFirst { it.trim() == "[profiles]" }
+        if (boundaryIdx < 0) boundaryIdx = lines.indexOfFirst { it.trim() == "[schemes]" }
+        if (boundaryIdx < 0) boundaryIdx = lines.size
 
         val result = StringBuilder()
         for ((idx, raw) in lines.withIndex()) {
@@ -360,20 +544,38 @@ object IniParser {
         return result.toString().trimEnd() + "\n"
     }
 
-    /** Patch a key only within a specific profile section. */
+    /** Patch a key only within a specific profile's `[profiles] -> [<profile>]` sub-section.
+     *  If the section exists but lacks the key, the key is appended at the end of that
+     *  section (just before the next `[...]` header or EOF). If the `[<profile>]` section
+     *  doesn't exist at all, a new one is inserted right after `[profiles]`. */
     fun patchProfileKey(text: String, profile: String, key: String, value: String): String {
-        val targetHeader = "= profile: $profile ="
         val lines = text.lines()
         val result = StringBuilder()
+        var inProfiles = false
         var inTarget = false
         var patched = false
 
+        fun closeTarget() {
+            if (inTarget && !patched) {
+                result.appendLine("$key = $value")
+                patched = true
+            }
+        }
+
         for (raw in lines) {
             val trimmed = raw.trim()
-            if (trimmed.startsWith("=") && trimmed.endsWith("=") && trimmed.length > 2) {
-                inTarget = (trimmed == targetHeader)
-            } else if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-                inTarget = false
+            val m = SECTION_RE.find(trimmed)
+            if (m != null) {
+                val hdr = m.groupValues[1]
+                closeTarget()
+                when {
+                    hdr == "schemes" -> { inProfiles = false; inTarget = false }
+                    hdr == "profiles" -> { inProfiles = true; inTarget = false }
+                    inProfiles && hdr !in TOPLEVEL_SECTIONS -> inTarget = (hdr == profile)
+                    else -> { inProfiles = false; inTarget = false }
+                }
+                result.appendLine(raw)
+                continue
             }
             if (inTarget && !patched) {
                 val eq = trimmed.indexOf('=')
@@ -388,27 +590,56 @@ object IniParser {
             }
             result.appendLine(raw)
         }
+        closeTarget()
+
         if (!patched) {
+            // [<profile>] section doesn't exist at all — insert a new one right after [profiles].
+            val out = result.toString().lines().toMutableList()
+            val profilesIdx = out.indexOfFirst { it.trim() == "[profiles]" }
+            if (profilesIdx >= 0) {
+                out.addAll(profilesIdx + 1, listOf("[$profile]", "$key = $value", ""))
+                return out.joinToString("\n").trimEnd() + "\n"
+            }
             result.appendLine()
+            result.appendLine("[$profile]")
             result.appendLine("$key = $value")
         }
         return result.toString().trimEnd() + "\n"
     }
 
-    /** Remove a custom scheme section from INI text. */
+    /** True if `[schemes]` contains a `[name]` sub-section. */
+    fun hasSchemeSection(text: String, name: String): Boolean {
+        var inSchemes = false
+        for (line in text.lines()) {
+            val hdr = SECTION_RE.find(line.trim())?.groupValues?.get(1) ?: continue
+            when {
+                hdr == "schemes" -> inSchemes = true
+                hdr == "profiles" -> inSchemes = false
+                inSchemes && hdr !in TOPLEVEL_SECTIONS -> if (hdr == name) return true
+                else -> inSchemes = false
+            }
+        }
+        return false
+    }
+
+    /** Remove a custom scheme's `[schemes] -> [name]` sub-section from INI text. */
     fun removeSchemeSection(text: String, name: String): String {
-        val header = "= scheme: $name ="
         val lines = text.lines()
         val result = mutableListOf<String>()
+        var inSchemes = false
         var skipping = false
         for (line in lines) {
             val trimmed = line.trim()
-            if (trimmed == header) { skipping = true; continue }
-            if (skipping) {
-                val isNewSection = (trimmed.startsWith("=") && trimmed.endsWith("=") && trimmed.length > 2)
-                    || (trimmed.startsWith("[") && trimmed.endsWith("]"))
-                if (isNewSection) skipping = false else continue
+            val hdr = SECTION_RE.find(trimmed)?.groupValues?.get(1)
+            if (hdr != null) {
+                when {
+                    hdr == "schemes" -> { inSchemes = true; skipping = false }
+                    hdr == "profiles" -> { inSchemes = false; skipping = false }
+                    inSchemes && hdr !in TOPLEVEL_SECTIONS -> skipping = (hdr == name)
+                    else -> { inSchemes = false; skipping = false }
+                }
             }
+            if (skipping) continue
             result.add(line)
         }
         return result.joinToString("\n").trimEnd() + "\n"
@@ -439,7 +670,7 @@ object IniParser {
 
     private fun schemeToIniSection(name: String, colors: SchemeColors) = buildString {
         appendLine()
-        appendLine("= scheme: $name =")
+        appendLine("[$name]")
         appendLine("color_bg = ${colors.bg}")
         appendLine("color_fg = ${colors.fg}")
         appendLine("color_bg_bar = ${colors.bgBar}")

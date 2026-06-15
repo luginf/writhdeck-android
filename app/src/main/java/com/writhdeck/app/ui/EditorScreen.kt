@@ -501,6 +501,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val fontBold by vm.fontBold.collectAsStateWithLifecycle()
     val blockCursor by vm.blockCursor.collectAsStateWithLifecycle()
     val spellCheckEnabled by vm.spellCheckEnabled.collectAsStateWithLifecycle()
+    val spellCheckLanguage by vm.spellCheckLanguage.collectAsStateWithLifecycle()
     val lineSpacing by vm.lineSpacing.collectAsStateWithLifecycle()
     val hemingwayMode by vm.hemingwayMode.collectAsStateWithLifecycle()
     val lineNumbersEnabled by vm.lineNumbersEnabled.collectAsStateWithLifecycle()
@@ -798,8 +799,12 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     // system uses, but covering old and new text alike. Mirrors the Tcl/web
     // viewport-only `spell_highlight`.
     val spellCheckerSession = remember { arrayOfNulls<SpellCheckerSession>(1) }
-    DisposableEffect(Unit) {
+    // Re-created whenever the user picks a different spell-check language in Settings
+    // (Display > Editor) — "system" lets the spell checker service decide based on its
+    // own settings; an explicit BCP-47 tag pins the session to that locale.
+    DisposableEffect(spellCheckLanguage) {
         val tsm = context.getSystemService(Context.TEXT_SERVICES_MANAGER_SERVICE) as TextServicesManager
+        val locale = if (spellCheckLanguage == "system") null else Locale.forLanguageTag(spellCheckLanguage)
         val listener = object : SpellCheckerSession.SpellCheckerSessionListener {
             override fun onGetSuggestions(results: Array<out SuggestionsInfo>?) {}
             override fun onGetSentenceSuggestions(results: Array<out SentenceSuggestionsInfo>?) {
@@ -821,11 +826,11 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                 }
             }
         }
-        spellCheckerSession[0] = tsm.newSpellCheckerSession(null, null, listener, true)
+        spellCheckerSession[0] = tsm.newSpellCheckerSession(null, locale, listener, locale == null)
         onDispose { spellCheckerSession[0]?.close(); spellCheckerSession[0] = null }
     }
 
-    LaunchedEffect(content, spellCheckEnabled, spellCheckTick, currentFile?.path, wsActive) {
+    LaunchedEffect(content, spellCheckEnabled, spellCheckLanguage, spellCheckTick, currentFile?.path, wsActive) {
         val editable = editorRef.value?.editableText ?: return@LaunchedEffect
         if (!spellCheckEnabled) {
             editable.getSpans(0, editable.length, SpellErrorSpan::class.java).forEach { editable.removeSpan(it) }

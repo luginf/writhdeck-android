@@ -74,7 +74,8 @@ data class SettingsData(
     val browserFilter: String = "*.txt *.t2t *.md *.ini",
     val browserShowAll: Boolean = false,
     val docsCustomDir: String = "",
-    val spellCheckEnabled: Boolean = true
+    val spellCheckEnabled: Boolean = true,
+    val spellCheckLanguage: String = "system"
 )
 
 class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
@@ -186,6 +187,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     private val _spellCheckEnabled = MutableStateFlow(true)
     val spellCheckEnabled = _spellCheckEnabled.asStateFlow()
 
+    private val _spellCheckLanguage = MutableStateFlow("system")
+    val spellCheckLanguage = _spellCheckLanguage.asStateFlow()
+
     private val _timerType = MutableStateFlow("countdown")
     val timerType = _timerType.asStateFlow()
 
@@ -272,8 +276,12 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
         config = withContext(Dispatchers.IO) {
             val iniFile = File(dd, "writhdeck.ini")
-            if (iniFile.exists()) IniParser.parse(iniFile.readText())
-            else {
+            if (iniFile.exists()) {
+                val raw = iniFile.readText()
+                val migrated = IniParser.migrateProfileScopedKeys(IniParser.migrateLegacyFormat(raw))
+                if (migrated != raw) iniFile.writeText(migrated)
+                IniParser.parse(migrated)
+            } else {
                 val defaultConfig = AppConfig()
                 iniFile.writeText(IniParser.write(defaultConfig))
                 defaultConfig
@@ -318,6 +326,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _fontBold.value = config.fontBold
         _blockCursor.value = config.blockCursor
         _spellCheckEnabled.value = config.spellCheckEnabled
+        _spellCheckLanguage.value = config.spellCheckLanguage
         _darkModePreference.value = config.androidDarkMode
         _customSchemes.value = config.customSchemes
         _activeScheme.value = config.scheme
@@ -471,7 +480,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             val iniFile = File(configDir, "writhdeck.ini")
             if (iniFile.exists()) {
-                iniFile.writeText(IniParser.patchKeys(iniFile.readText(), "android_dark_mode" to pref))
+                iniFile.writeText(IniParser.patchProfileKey(iniFile.readText(), config.activeProfile, "android_dark_mode", pref))
             } else {
                 iniFile.writeText(IniParser.write(config))
             }
@@ -484,7 +493,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             val iniFile = File(configDir, "writhdeck.ini")
             if (iniFile.exists()) {
-                iniFile.writeText(IniParser.patchKeys(iniFile.readText(), "line_numbers" to if (enabled) "yes" else "no"))
+                iniFile.writeText(IniParser.patchProfileKey(iniFile.readText(), config.activeProfile, "line_numbers", if (enabled) "yes" else "no"))
             } else {
                 iniFile.writeText(IniParser.write(config))
             }
@@ -497,7 +506,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             val iniFile = File(configDir, "writhdeck.ini")
             if (iniFile.exists()) {
-                iniFile.writeText(IniParser.patchKeys(iniFile.readText(), "block_cursor" to if (enabled) "yes" else "no"))
+                iniFile.writeText(IniParser.patchProfileKey(iniFile.readText(), config.activeProfile, "block_cursor", if (enabled) "yes" else "no"))
             } else {
                 iniFile.writeText(IniParser.write(config))
             }
@@ -517,16 +526,16 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Switch the active profile (`active_profile` in `[editor]`/`= editor =`). Unlike the
-     *  other setters, this re-derives the whole config from disk afterwards, since profile
-     *  sections (`= profile: <name> =`) override scheme/margins/word goal/etc. — the new
-     *  values can't be computed from the in-memory config alone. */
+    /** Switch the active profile (`profile` in `[editor]`). Unlike the other setters, this
+     *  re-derives the whole config from disk afterwards, since profile sub-sections
+     *  (`[profiles] -> [<name>]`) override scheme/margins/word goal/etc. — the new values
+     *  can't be computed from the in-memory config alone. */
     fun switchProfile(name: String) {
         if (name == config.activeProfile) return
         viewModelScope.launch(Dispatchers.IO) {
             val iniFile = File(configDir, "writhdeck.ini")
             val text = if (iniFile.exists()) iniFile.readText() else IniParser.write(config)
-            val patched = IniParser.patchKeys(text, "active_profile" to name)
+            val patched = IniParser.patchKeys(text, "profile" to name)
             iniFile.writeText(patched)
             config = IniParser.parse(patched)
             applyConfig()
@@ -1029,7 +1038,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         browserFilter    = config.browserFilter,
         browserShowAll   = config.browserShowAll,
         docsCustomDir    = config.docsCustomDir,
-        spellCheckEnabled = config.spellCheckEnabled
+        spellCheckEnabled = config.spellCheckEnabled,
+        spellCheckLanguage = config.spellCheckLanguage
     )
 
     fun applySettings(s: SettingsData) {
@@ -1064,7 +1074,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             browserFilter    = s.browserFilter,
             browserShowAll   = s.browserShowAll,
             docsCustomDir    = s.docsCustomDir,
-            spellCheckEnabled = s.spellCheckEnabled
+            spellCheckEnabled = s.spellCheckEnabled,
+            spellCheckLanguage = s.spellCheckLanguage
         )
         applyConfig()
         refreshDocs()
@@ -1074,15 +1085,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             fun b(v: Boolean) = if (v) "yes" else "no"
             var text = if (iniFile.exists()) iniFile.readText() else IniParser.write(config)
             text = IniParser.patchKeys(text,
-                "font_size"         to s.fontSize.toString(),
-                "font_family"       to s.fontFamily,
                 "font_bold"         to b(s.fontBold),
-                "block_cursor"      to b(s.blockCursor),
-                "margin_width"      to s.marginWidth.toString(),
-                "margin_height"     to s.marginHeight.toString(),
-                "word_goal"         to s.wordGoal.toString(),
-                "heading_marker"    to s.headingMarker,
-                "markdown_headings" to b(s.markdownHeadings),
                 "comment_marker"    to s.commentMarker,
                 "bold_marker"       to s.boldMarker,
                 "italic_marker"     to s.italicMarker,
@@ -1099,16 +1102,30 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 "status_center"     to s.statusCenter,
                 "status_right"      to s.statusRight,
                 "hemingway_mode"    to b(s.hemingwayMode),
-                "line_spacing"      to s.lineSpacing.toString(),
                 "browser_filter"    to s.browserFilter,
                 "browser_show_all"  to b(s.browserShowAll),
                 "docs_dir"          to s.docsCustomDir,
-                "spell_check"       to b(s.spellCheckEnabled)
+                "spell_check"       to b(s.spellCheckEnabled),
+                "spell_check_language" to s.spellCheckLanguage
             )
+            // Profile-scoped keys (defined per `[profiles] -> [<name>]` sub-section, see
+            // IniParser.write()'s default/novel template) — patched only within the
+            // currently active profile's section, unlike the global keys above.
+            // patchKeys() doesn't track sections, so using it here would overwrite
+            // every profile's value with the same one.
             text = IniParser.patchProfileKey(text, activeProfile, "scheme", s.scheme)
+            text = IniParser.patchProfileKey(text, activeProfile, "heading_marker", s.headingMarker)
+            text = IniParser.patchProfileKey(text, activeProfile, "markdown_headings", b(s.markdownHeadings))
+            text = IniParser.patchProfileKey(text, activeProfile, "margin_width", s.marginWidth.toString())
+            text = IniParser.patchProfileKey(text, activeProfile, "margin_height", s.marginHeight.toString())
+            text = IniParser.patchProfileKey(text, activeProfile, "word_goal", s.wordGoal.toString())
+            text = IniParser.patchProfileKey(text, activeProfile, "font_size", s.fontSize.toString())
+            text = IniParser.patchProfileKey(text, activeProfile, "font_family", s.fontFamily)
+            text = IniParser.patchProfileKey(text, activeProfile, "line_spacing", IniParser.lineSpacingToIni(s.lineSpacing).toString())
+            text = IniParser.patchProfileKey(text, activeProfile, "block_cursor", b(s.blockCursor))
             // Ensure all built-in scheme sections are present (add missing ones)
             for ((name, colors) in BUILTIN_SCHEMES) {
-                if (!text.contains("= scheme: $name =")) {
+                if (!IniParser.hasSchemeSection(text, name)) {
                     text = IniParser.writeCustomScheme(text, name, colors)
                 }
             }

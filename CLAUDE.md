@@ -54,16 +54,18 @@ The letter only advances when the requested Gradle tasks contain `assemble`/`bun
 
 ### INI parsing
 
-`IniParser.parse()` is section-aware. `= profile: name =` headers route keys into per-profile maps; `active_profile` in the global section selects which profile's keys override the globals.
+`IniParser.parse()` is section-aware, format identical to Tcl/JS: `[section]` headers (regex `^\[(\w+)\]$`). `[profiles]`/`[schemes]` are containers followed by named `[<name>]` sub-sections; `TOPLEVEL_SECTIONS` (union of Tcl/web top-level sections + Android's `status_bar`) disambiguates a `[<name>]` seen inside `[profiles]`/`[schemes]` (top-level name → closes the container; otherwise → names a profile/scheme). `profile = <name>` inside `[editor]` selects which profile's keys override the globals.
+
+`IniParser.migrateLegacyFormat(text)` / `migrateProfileScopedKeys(text)` are one-shot, lossless, idempotent migrations run in `initApp()`: the former converts the legacy `= profile: <name> =`/`active_profile` dialect to the `[section]` format above; the latter moves `PROFILE_SCOPED_KEYS` values from global scope into each `[profiles] -> [<name>]` sub-section (without overwriting a profile that already defines the key).
 
 `IniParser.write()` generates a complete template with:
 - Comment listing all 8 schemes
-- Two profile sections: `= profile: default =` and `= profile: novel =`
-- `active_profile = default` in the global section
+- `[profiles]` containing `[default]` and `[novel]` sub-sections (12 per-profile keys each — see below)
+- `profile = default` inside `[editor]`
 
-`IniParser.patchKeys()` patches key=value pairs anywhere in the INI (global keys like `android_dark_mode`).
+`IniParser.patchKeys()` patches key=value pairs anywhere in the INI (global keys like `font_bold`).
 
-`IniParser.patchProfileKey(text, profile, key, value)` patches a key only inside a `= profile: name =` section — use this for profile-level keys (`scheme`, `font_size`, `margin_width`, etc.) to avoid clobbering values in other sections.
+`IniParser.patchProfileKey(text, profile, key, value)` patches a key only inside a `[profiles] -> [<profile>]` sub-section — used for the 12 per-profile keys (`PROFILE_SCOPED_KEYS` ∪ the original 6: `scheme`, `heading_marker`, `markdown_headings`, `margin_width`, `margin_height`, `word_goal`, plus `font_size`, `font_family`, `line_spacing`, `line_numbers`, `android_dark_mode`, `block_cursor`) to avoid clobbering values in other profiles/sections.
 
 `IniParser.writeCustomScheme(text, name, colors)` / `removeSchemeSection(text, name)` manage `= scheme: name =` sections for custom schemes.
 
@@ -195,11 +197,11 @@ No upper limit enforced by the parser — `IniParser.parse()` uses `coerceAtLeas
 
 ### Color schemes
 
-`SchemeColors` has 16 fields (8 dark + 8 light). `BUILTIN_SCHEMES` has 8 built-in schemes. `AppConfig.customSchemes: Map<String, SchemeColors>` holds INI-parsed `= scheme: name =` sections; `schemeColors()` checks custom first, then builtins. `SchemeConfigScreen` lists all schemes with color swatches, lets user select the active scheme, edit any scheme (builtin or custom), or create new custom schemes. Custom schemes are persisted via `IniParser.writeCustomScheme`.
+`SchemeColors` has 16 fields (8 dark + 8 light). `BUILTIN_SCHEMES` has 8 built-in schemes. `AppConfig.customSchemes: Map<String, SchemeColors>` holds INI-parsed `[schemes] -> [<name>]` sub-sections; `schemeColors()` checks custom first, then builtins. `SchemeConfigScreen` lists all schemes with color swatches, lets user select the active scheme, edit any scheme (builtin or custom), or create new custom schemes. Custom schemes are persisted via `IniParser.writeCustomScheme`.
 
 ### Settings screen
 
-`SettingsData` data class mirrors the user-configurable fields of `AppConfig`. `getSettingsData()` reads current config; `applySettings(s)` calls `config.copy(...)`, `applyConfig()`, then `IniParser.patchKeys` to persist all fields.
+`SettingsData` data class mirrors the user-configurable fields of `AppConfig`. `getSettingsData()` reads current config; `applySettings(s)` calls `config.copy(...)`, `applyConfig()`, then persists fields via `IniParser.patchKeys` (global, e.g. `font_bold`) and `IniParser.patchProfileKey` for the 12 per-profile keys (`scheme`, `heading_marker`, `markdown_headings`, `margin_width`, `margin_height`, `word_goal`, `font_size`, `font_family`, `line_spacing`, `line_numbers`, `android_dark_mode`, `block_cursor`), scoped to `config.activeProfile`.
 
 `SettingsScreen` is tabbed via `ScrollableTabRow`/`Tab`, mirroring the desktop Tcl/Tk config dialog's tab set and order (`SETTINGS_TABS`): **Profile** (margins, word goal, line spacing), **Display** (heading marker, status bar zones), **Fonts** (font size, font family, bold, live preview), **Schemes** (scheme dropdown + "Edit scheme colors" → `SchemeConfigScreen`), **Timer** (type, duration, sound, alert, status bar display), **Misc** (Hemingway mode, autosave, "Edit INI directly"). Each tab is a private `@Composable` taking `(s: SettingsData, onChange: (SettingsData) -> Unit)`. `selectedTab` is local `mutableIntStateOf` — not persisted.
 

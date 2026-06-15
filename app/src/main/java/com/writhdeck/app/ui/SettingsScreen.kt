@@ -26,6 +26,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -33,8 +34,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.content.Context
 import android.graphics.Typeface
 import android.os.Environment
+import android.view.textservice.TextServicesManager
 import java.io.File
 import com.writhdeck.app.EDITOR_FONTS
 import com.writhdeck.app.SettingsData
@@ -143,6 +146,9 @@ private fun DisplayTab(s: SettingsData, onChange: (SettingsData) -> Unit) {
     SwitchSettingRow("Markdown headings (#)", s.markdownHeadings) { onChange(s.copy(markdownHeadings = it)) }
     SwitchSettingRow("Block cursor", s.blockCursor) { onChange(s.copy(blockCursor = it)) }
     SwitchSettingRow("Spell check", s.spellCheckEnabled) { onChange(s.copy(spellCheckEnabled = it)) }
+    DropdownSettingRow("Spell check language", s.spellCheckLanguage, spellCheckLanguageOptions()) {
+        onChange(s.copy(spellCheckLanguage = it))
+    }
 
     SettingsSection("Markup")
     StringSettingRow("Comment marker", s.commentMarker) { onChange(s.copy(commentMarker = it)) }
@@ -585,6 +591,22 @@ private fun FloatSettingRow(
             enabled = value < max,
             modifier = Modifier.size(36.dp)
         ) { Text("+", style = MaterialTheme.typography.titleMedium) }
+    }
+}
+
+/** "system" (let the spell checker service pick its own language) plus the BCP-47
+ *  language tags of every subtype the device's enabled spell checker supports
+ *  (usually one per installed keyboard language). */
+@Composable
+private fun spellCheckLanguageOptions(): List<String> {
+    val context = LocalContext.current
+    return remember {
+        val tsm = context.getSystemService(Context.TEXT_SERVICES_MANAGER_SERVICE) as TextServicesManager
+        val info = tsm.currentSpellCheckerInfo
+        val tags = (0 until (info?.subtypeCount ?: 0)).mapNotNull { i ->
+            info?.getSubtypeAt(i)?.languageTag?.takeIf { it.isNotBlank() }
+        }
+        listOf("system") + tags.distinct().sorted()
     }
 }
 
