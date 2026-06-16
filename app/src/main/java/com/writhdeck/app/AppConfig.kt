@@ -138,7 +138,7 @@ object IniParser {
         "display", "web", "tui_colors"
     )
 
-    private val SECTION_RE = Regex("^\\[(\\w+)\\]$")
+    private val SECTION_RE = Regex("^\\[([\\w][\\w ]*)\\]$")
 
     /** Keys that moved from global scope to per-profile scope (`[profiles] -> [<name>]`),
      *  aligning Android with the Tcl desktop's profile model (font, line spacing, line
@@ -146,7 +146,7 @@ object IniParser {
      *  [migrateProfileScopedKeys] to migrate existing `.ini` files written by older
      *  versions of [write], which had these keys in `[behaviour]`/`[misc]`. */
     private val PROFILE_SCOPED_KEYS = setOf(
-        "font_size", "font_family", "line_spacing", "line_numbers", "android_dark_mode", "block_cursor"
+        "font_size", "font_family", "font_bold", "line_spacing", "line_numbers", "android_dark_mode", "block_cursor"
     )
 
     /** `line_spacing` uses incompatible units across versions: the Tcl desktop stores a
@@ -418,9 +418,11 @@ object IniParser {
             appendLine("% WrithDeck — configuration")
             appendLine("% Schemes: default solarized gruvbox everforest nord alt01 alt02 retro")
             appendLine()
+            appendLine("= Editor =")
             appendLine("[editor]")
             appendLine("profile = ${config.activeProfile}")
             appendLine()
+            appendLine("= Behaviour =")
             appendLine("[behaviour]")
             appendLine("cursor_restore = yes")
             appendLine("autosave_enabled = yes")
@@ -431,11 +433,13 @@ object IniParser {
             appendLine("% browser_show_all: bypass browser_filter and show all files")
             appendLine("browser_show_all = ${bool(config.browserShowAll)}")
             appendLine()
+            appendLine("= Status bar =")
             appendLine("[status_bar]")
             appendLine("status_left = ${config.statusLeft}")
             appendLine("status_center = ${config.statusCenter}")
             appendLine("status_right = ${config.statusRight}")
             appendLine()
+            appendLine("= Timer =")
             appendLine("[timer]")
             appendLine("timer_type = ${config.timerType}")
             appendLine("timer_duration = ${config.timerDuration}")
@@ -443,12 +447,14 @@ object IniParser {
             appendLine("timer_alert = ${bool(config.timerAlert)}")
             appendLine("chrono_show = ${bool(config.chronoShow)}")
             appendLine()
+            appendLine("= Misc =")
             appendLine("[misc]")
             appendLine("% docs_dir: optional absolute path to a custom documents folder; empty = default")
             appendLine("docs_dir = ${config.docsCustomDir}")
             appendLine("spell_check = ${bool(config.spellCheckEnabled)}")
             appendLine("spell_check_language = ${config.spellCheckLanguage}")
             appendLine()
+            appendLine("= Keys =")
             appendLine("[keys]")
             appendLine("% Use Tk key names: Control-s, Alt-Return, F11, etc.")
             appendLine("key_save = ${config.keySave}")
@@ -461,8 +467,10 @@ object IniParser {
             appendLine("key_line_numbers = ${config.keyLineNumbers}")
             appendLine("key_cmd_mode = ${config.keyCmdMode}")
             appendLine()
+            appendLine("= Profiles =")
             appendLine("[profiles]")
             appendLine()
+            appendLine("== default ==")
             appendLine("[default]")
             appendLine("scheme = default")
             appendLine("heading_marker = =")
@@ -472,11 +480,13 @@ object IniParser {
             appendLine("word_goal = 0")
             appendLine("font_size = 16")
             appendLine("font_family = monospace")
+            appendLine("font_bold = no")
             appendLine("line_spacing = ${lineSpacingToIni(1.5f)}")
             appendLine("line_numbers = no")
             appendLine("android_dark_mode = auto")
             appendLine("block_cursor = no")
             appendLine()
+            appendLine("== novel ==")
             appendLine("[novel]")
             appendLine("scheme = everforest")
             appendLine("heading_marker = =")
@@ -486,11 +496,13 @@ object IniParser {
             appendLine("word_goal = 1000")
             appendLine("font_size = 18")
             appendLine("font_family = serif")
+            appendLine("font_bold = no")
             appendLine("line_spacing = ${lineSpacingToIni(1.8f)}")
             appendLine("line_numbers = no")
             appendLine("android_dark_mode = auto")
             appendLine("block_cursor = no")
             appendLine()
+            appendLine("= Schemes =")
             appendLine("[schemes]")
         } + BUILTIN_SCHEMES.entries.joinToString("") { (name, colors) ->
             schemeToIniSection(name, colors) + "\n"
@@ -620,6 +632,29 @@ object IniParser {
             }
         }
         return false
+    }
+
+    /** Remove a profile's `[profiles] -> [name]` sub-section from INI text. */
+    fun removeProfileSection(text: String, name: String): String {
+        val lines = text.lines()
+        val result = mutableListOf<String>()
+        var inProfiles = false
+        var skipping = false
+        for (line in lines) {
+            val trimmed = line.trim()
+            val hdr = SECTION_RE.find(trimmed)?.groupValues?.get(1)
+            if (hdr != null) {
+                when {
+                    hdr == "profiles" -> { inProfiles = true; skipping = false }
+                    hdr == "schemes"  -> { inProfiles = false; skipping = false }
+                    inProfiles && hdr !in TOPLEVEL_SECTIONS -> skipping = (hdr == name)
+                    else -> { inProfiles = false; skipping = false }
+                }
+            }
+            if (skipping) continue
+            result.add(line)
+        }
+        return result.joinToString("\n").trimEnd() + "\n"
     }
 
     /** Remove a custom scheme's `[schemes] -> [name]` sub-section from INI text. */

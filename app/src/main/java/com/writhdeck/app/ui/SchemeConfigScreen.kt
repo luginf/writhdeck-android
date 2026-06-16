@@ -13,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.*
@@ -90,6 +91,7 @@ fun SchemeConfigScreen(vm: WrithdeckViewModel, onBack: () -> Unit) {
                 editing = name to base
             },
             onNew = { editing = "" to BUILTIN_SCHEMES["default"]!! },
+            onDuplicate = { name, colors -> vm.saveCustomScheme(name, colors) },
             onDelete = { vm.deleteCustomScheme(it) },
             onBack = onBack
         )
@@ -105,9 +107,54 @@ private fun SchemeList(
     onSelect: (String) -> Unit,
     onEdit: (String) -> Unit,
     onNew: () -> Unit,
+    onDuplicate: (String, SchemeColors) -> Unit,
     onDelete: (String) -> Unit,
     onBack: () -> Unit
 ) {
+    // Duplicate dialog state: origin name + colors to copy
+    var duplicating by remember { mutableStateOf<Pair<String, SchemeColors>?>(null) }
+    var dupName     by remember { mutableStateOf("") }
+    var dupError    by remember { mutableStateOf("") }
+
+    duplicating?.let { (origName, origColors) ->
+        AlertDialog(
+            onDismissRequest = { duplicating = null },
+            title = { Text("Duplicate scheme", fontFamily = FontFamily.Monospace) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "New name for copy of \"$origName\":",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedTextField(
+                        value = dupName,
+                        onValueChange = { dupName = it; dupError = "" },
+                        singleLine = true,
+                        isError = dupError.isNotEmpty(),
+                        supportingText = if (dupError.isNotEmpty()) {{ Text(dupError) }} else null,
+                        textStyle = TextStyle(fontFamily = FontFamily.Monospace),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val n = dupName.trim()
+                    when {
+                        n.isEmpty()               -> dupError = "Name cannot be empty."
+                        allSchemes.containsKey(n) -> dupError = "\"$n\" already exists."
+                        else -> {
+                            onDuplicate(n, origColors)
+                            duplicating = null
+                        }
+                    }
+                }) { Text("Create") }
+            },
+            dismissButton = {
+                TextButton(onClick = { duplicating = null }) { Text("Cancel") }
+            },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -134,7 +181,8 @@ private fun SchemeList(
                     isCustom = name in customSchemeNames,
                     onSelect = { onSelect(name) },
                     onEdit = { onEdit(name) },
-                    onDelete = { onDelete(name) }
+                    onDuplicate = { dupName = "${name}_copy"; dupError = ""; duplicating = name to colors },
+                    onDelete = { onDelete(name) },
                 )
                 HorizontalDivider()
             }
@@ -150,7 +198,8 @@ private fun SchemeRow(
     isCustom: Boolean,
     onSelect: () -> Unit,
     onEdit: () -> Unit,
-    onDelete: () -> Unit
+    onDuplicate: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -161,7 +210,7 @@ private fun SchemeRow(
             )
             .clickable(onClick = onSelect)
             .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         ColorSwatch(colors.bg)
         Spacer(Modifier.width(3.dp))
@@ -173,16 +222,19 @@ private fun SchemeRow(
             text = name,
             modifier = Modifier.weight(1f),
             fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.bodyMedium
+            style = MaterialTheme.typography.bodyMedium,
         )
         if (isActive) {
             Icon(
                 Icons.Default.Check,
                 contentDescription = "Active",
                 tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(20.dp),
             )
             Spacer(Modifier.width(4.dp))
+        }
+        IconButton(onClick = onDuplicate, modifier = Modifier.size(40.dp)) {
+            Icon(Icons.Default.ContentCopy, contentDescription = "Duplicate", modifier = Modifier.size(18.dp))
         }
         IconButton(onClick = onEdit, modifier = Modifier.size(40.dp)) {
             Icon(Icons.Default.Edit, contentDescription = "Edit", modifier = Modifier.size(18.dp))
@@ -196,12 +248,13 @@ private fun SchemeRow(
 }
 
 @Composable
-private fun ColorSwatch(hex: String, size: Dp = 18.dp) {
+private fun ColorSwatch(hex: String, size: Dp = 18.dp, onClick: (() -> Unit)? = null) {
     Box(
         modifier = Modifier
             .size(size)
             .background(parseHex(hex) ?: Color.Gray)
             .border(0.5.dp, Color.Gray.copy(alpha = 0.4f))
+            .let { m -> if (onClick != null) m.clickable(onClick = onClick) else m }
     )
 }
 
@@ -301,21 +354,31 @@ private fun SchemeEditor(
 private fun ColorField(
     label: String,
     value: String,
-    onValueChange: (String) -> Unit
+    onValueChange: (String) -> Unit,
 ) {
+    var showPicker by remember { mutableStateOf(false) }
+
+    if (showPicker) {
+        ColorPickerDialog(
+            initialHex = value,
+            onConfirm = { hex -> onValueChange(hex); showPicker = false },
+            onDismiss = { showPicker = false },
+        )
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(
             text = label,
             modifier = Modifier.width(92.dp),
-            style = MaterialTheme.typography.bodySmall
+            style = MaterialTheme.typography.bodySmall,
         )
-        ColorSwatch(value, size = 24.dp)
+        ColorSwatch(value, size = 28.dp, onClick = { showPicker = true })
         OutlinedTextField(
             value = value,
             onValueChange = onValueChange,
@@ -323,7 +386,7 @@ private fun ColorField(
             modifier = Modifier.weight(1f),
             textStyle = TextStyle(fontFamily = FontFamily.Monospace),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
-            isError = value.isNotEmpty() && parseHex(value) == null
+            isError = value.isNotEmpty() && parseHex(value) == null,
         )
     }
 }

@@ -4,6 +4,8 @@ Android app for [WrithDeck](https://github.com/luginf/writhdeck) — a distracti
 
 Pure Kotlin + Jetpack Compose. No Tcl/JNI engine — all logic (config parsing, state persistence, color schemes) is implemented directly in Kotlin.
 
+![WrithDeck](media/writhdeck-android01.jpg)
+
 ---
 
 ## Features

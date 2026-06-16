@@ -1,4 +1,5 @@
 .gradle/
+archives/
 build/
 *.apk
 *.aab
@@ -13,3 +14,6 @@ app/version.properties
 tcl-android/
 tcl8.6.15/
 tcl8.6.15-src.tar.gz
+writhdeck.jks
+writhdeck.jks.info.txt
+writhdeck-release.apk*

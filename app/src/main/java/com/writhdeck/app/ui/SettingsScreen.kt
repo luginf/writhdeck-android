@@ -15,6 +15,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -105,7 +107,12 @@ fun SettingsScreen(
                     .padding(bottom = 32.dp + extraBottomPad)
             ) {
                 when (selectedTab) {
-                    0 -> ProfileTab(s, activeProfile, profileNames, onSwitchProfile = vm::switchProfile) { s = it }
+                    0 -> ProfileTab(
+                        s, activeProfile, profileNames,
+                        onSwitchProfile = vm::switchProfile,
+                        onNewProfile    = { name -> vm.newProfile(name, s) },
+                        onDeleteProfile = { vm.deleteProfile() }
+                    ) { s = it }
                     1 -> DisplayTab(s) { s = it }
                     2 -> FontsTab(s) { s = it }
                     3 -> SchemesTab(s, vm, onNavigateSchemes = { vm.applySettings(s); onNavigateSchemes() }) { s = it }
@@ -117,18 +124,112 @@ fun SettingsScreen(
     }
 }
 
+private val PROFILE_NAME_RE = Regex("^\\w+$")
+
 @Composable
 private fun ProfileTab(
     s: SettingsData,
     activeProfile: String,
     profileNames: List<String>,
     onSwitchProfile: (String) -> Unit,
+    onNewProfile: (String) -> Unit,
+    onDeleteProfile: () -> Unit,
     onChange: (SettingsData) -> Unit
 ) {
+    var showNewDialog     by remember { mutableStateOf(false) }
+    var newProfileName    by remember { mutableStateOf("") }
+    var nameError         by remember { mutableStateOf("") }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+
     SettingsSection("Active profile")
     DropdownSettingRow("Profile", activeProfile, profileNames, onChange = onSwitchProfile)
 
+    Row(
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        OutlinedButton(onClick = { newProfileName = ""; nameError = ""; showNewDialog = true }) {
+            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(4.dp))
+            Text("New profile", fontFamily = FontFamily.Monospace)
+        }
+        OutlinedButton(
+            onClick = { showDeleteConfirm = true },
+            enabled = profileNames.size > 1,
+            colors = ButtonDefaults.outlinedButtonColors(
+                contentColor = MaterialTheme.colorScheme.error
+            ),
+            border = ButtonDefaults.outlinedButtonBorder(enabled = profileNames.size > 1).copy(
+                brush = androidx.compose.ui.graphics.SolidColor(
+                    if (profileNames.size > 1) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                )
+            )
+        ) {
+            Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(4.dp))
+            Text("Delete", fontFamily = FontFamily.Monospace)
+        }
+    }
+
+    if (showNewDialog) {
+        AlertDialog(
+            onDismissRequest = { showNewDialog = false },
+            title = { Text("New profile", fontFamily = FontFamily.Monospace) },
+            text = {
+                Column {
+                    Text("Enter a name (letters, digits, _ only).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = newProfileName,
+                        onValueChange = { newProfileName = it; nameError = "" },
+                        singleLine = true,
+                        isError = nameError.isNotEmpty(),
+                        supportingText = if (nameError.isNotEmpty()) {{ Text(nameError) }} else null,
+                        textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val n = newProfileName.trim()
+                    when {
+                        n.isEmpty()                    -> nameError = "Name cannot be empty."
+                        !PROFILE_NAME_RE.matches(n)    -> nameError = "Letters, digits and _ only."
+                        profileNames.contains(n)       -> nameError = "Profile \"$n\" already exists."
+                        else -> { onNewProfile(n); showNewDialog = false }
+                    }
+                }) { Text("Create") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNewDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("Delete profile", fontFamily = FontFamily.Monospace) },
+            text = { Text("Delete profile \"$activeProfile\"? This cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = { onDeleteProfile(); showDeleteConfirm = false },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     SettingsSection("Profile settings")
+    DropdownSettingRow("Dark mode", s.androidDarkMode, listOf("auto", "yes", "no")) {
+        onChange(s.copy(androidDarkMode = it))
+    }
     IntSettingRow("Margin width", s.marginWidth, 0, 200) { onChange(s.copy(marginWidth = it)) }
     IntSettingRow("Margin height", s.marginHeight, 0, 200) { onChange(s.copy(marginHeight = it)) }
     IntSettingRow("Word goal", s.wordGoal, 0, 99999) { onChange(s.copy(wordGoal = it)) }
@@ -632,12 +733,17 @@ private fun FloatSettingRow(
 private fun spellCheckLanguageOptions(): List<String> {
     val context = LocalContext.current
     return remember {
-        val tsm = context.getSystemService(Context.TEXT_SERVICES_MANAGER_SERVICE) as TextServicesManager
-        val info = tsm.currentSpellCheckerInfo
-        val tags = (0 until (info?.subtypeCount ?: 0)).mapNotNull { i ->
-            info?.getSubtypeAt(i)?.languageTag?.takeIf { it.isNotBlank() }
+        try {
+            val tsm = context.getSystemService(Context.TEXT_SERVICES_MANAGER_SERVICE)
+                as? TextServicesManager ?: return@remember listOf("system")
+            val info = tsm.currentSpellCheckerInfo
+            val tags = (0 until (info?.subtypeCount ?: 0)).mapNotNull { i ->
+                info?.getSubtypeAt(i)?.languageTag?.takeIf { it.isNotBlank() }
+            }
+            listOf("system") + tags.distinct().sorted()
+        } catch (_: Throwable) {
+            listOf("system")
         }
-        listOf("system") + tags.distinct().sorted()
     }
 }
 

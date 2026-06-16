@@ -75,7 +75,8 @@ data class SettingsData(
     val browserShowAll: Boolean = false,
     val docsCustomDir: String = "",
     val spellCheckEnabled: Boolean = true,
-    val spellCheckLanguage: String = "system"
+    val spellCheckLanguage: String = "system",
+    val androidDarkMode: String = "auto"
 )
 
 class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
@@ -544,6 +545,49 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun newProfile(name: String, s: SettingsData) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val iniFile = File(configDir, "writhdeck.ini")
+            fun b(v: Boolean) = if (v) "yes" else "no"
+            var text = if (iniFile.exists()) iniFile.readText() else IniParser.write(config)
+            text = IniParser.patchProfileKey(text, name, "scheme",            s.scheme)
+            text = IniParser.patchProfileKey(text, name, "heading_marker",    s.headingMarker)
+            text = IniParser.patchProfileKey(text, name, "markdown_headings", b(s.markdownHeadings))
+            text = IniParser.patchProfileKey(text, name, "margin_width",      s.marginWidth.toString())
+            text = IniParser.patchProfileKey(text, name, "margin_height",     s.marginHeight.toString())
+            text = IniParser.patchProfileKey(text, name, "word_goal",         s.wordGoal.toString())
+            text = IniParser.patchProfileKey(text, name, "font_size",         s.fontSize.toString())
+            text = IniParser.patchProfileKey(text, name, "font_family",       s.fontFamily)
+            text = IniParser.patchProfileKey(text, name, "font_bold",         b(s.fontBold))
+            text = IniParser.patchProfileKey(text, name, "line_spacing",      IniParser.lineSpacingToIni(s.lineSpacing).toString())
+            text = IniParser.patchProfileKey(text, name, "block_cursor",      b(s.blockCursor))
+            text = IniParser.patchProfileKey(text, name, "android_dark_mode", s.androidDarkMode)
+            text = IniParser.patchKeys(text, "profile" to name)
+            iniFile.writeText(text)
+            config = IniParser.parse(text)
+            applyConfig()
+            refreshDocs()
+            refreshStatus()
+        }
+    }
+
+    fun deleteProfile() {
+        val name = config.activeProfile
+        if (_profileNames.value.size <= 1) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val iniFile = File(configDir, "writhdeck.ini")
+            var text = if (iniFile.exists()) iniFile.readText() else IniParser.write(config)
+            text = IniParser.removeProfileSection(text, name)
+            val switchTo = IniParser.parse(text).profileNames.firstOrNull() ?: "default"
+            text = IniParser.patchKeys(text, "profile" to switchTo)
+            iniFile.writeText(text)
+            config = IniParser.parse(text)
+            applyConfig()
+            refreshDocs()
+            refreshStatus()
+        }
+    }
+
     fun updateThemeColors(systemDark: Boolean) {
         _themeColors.value = config.themeColors(
             when (config.androidDarkMode) {
@@ -825,6 +869,23 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun saveAsUri(uri: Uri, cr: ContentResolver) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                cr.openOutputStream(uri, "wt")?.use { it.writer().use { w -> w.write(_content.value) } }
+            }
+            val name = uri.lastPathSegment
+                ?.substringAfterLast('/')
+                ?.substringAfterLast(':')
+                ?: "untitled.txt"
+            externalUri = uri
+            externalWritable = true
+            _fileWritable.value = true
+            _currentFile.value = DocEntry(name, uri.toString())
+            _dirty.value = false
+        }
+    }
+
     private suspend fun reloadConfig() {
         val iniFile = File(configDir, "writhdeck.ini")
         val text = withContext(Dispatchers.IO) {
@@ -1039,7 +1100,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         browserShowAll   = config.browserShowAll,
         docsCustomDir    = config.docsCustomDir,
         spellCheckEnabled = config.spellCheckEnabled,
-        spellCheckLanguage = config.spellCheckLanguage
+        spellCheckLanguage = config.spellCheckLanguage,
+        androidDarkMode   = config.androidDarkMode
     )
 
     fun applySettings(s: SettingsData) {
@@ -1074,8 +1136,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             browserFilter    = s.browserFilter,
             browserShowAll   = s.browserShowAll,
             docsCustomDir    = s.docsCustomDir,
-            spellCheckEnabled = s.spellCheckEnabled,
-            spellCheckLanguage = s.spellCheckLanguage
+            spellCheckEnabled  = s.spellCheckEnabled,
+            spellCheckLanguage = s.spellCheckLanguage,
+            androidDarkMode    = s.androidDarkMode
         )
         applyConfig()
         refreshDocs()
@@ -1085,7 +1148,6 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             fun b(v: Boolean) = if (v) "yes" else "no"
             var text = if (iniFile.exists()) iniFile.readText() else IniParser.write(config)
             text = IniParser.patchKeys(text,
-                "font_bold"         to b(s.fontBold),
                 "comment_marker"    to s.commentMarker,
                 "bold_marker"       to s.boldMarker,
                 "italic_marker"     to s.italicMarker,
@@ -1121,8 +1183,10 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             text = IniParser.patchProfileKey(text, activeProfile, "word_goal", s.wordGoal.toString())
             text = IniParser.patchProfileKey(text, activeProfile, "font_size", s.fontSize.toString())
             text = IniParser.patchProfileKey(text, activeProfile, "font_family", s.fontFamily)
+            text = IniParser.patchProfileKey(text, activeProfile, "font_bold", b(s.fontBold))
             text = IniParser.patchProfileKey(text, activeProfile, "line_spacing", IniParser.lineSpacingToIni(s.lineSpacing).toString())
             text = IniParser.patchProfileKey(text, activeProfile, "block_cursor", b(s.blockCursor))
+            text = IniParser.patchProfileKey(text, activeProfile, "android_dark_mode", s.androidDarkMode)
             // Ensure all built-in scheme sections are present (add missing ones)
             for ((name, colors) in BUILTIN_SCHEMES) {
                 if (!IniParser.hasSchemeSection(text, name)) {

@@ -657,6 +657,11 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     fun exportFileName(ext: String): String =
         "${(currentFile?.name ?: "Untitled").substringBeforeLast('.')}.$ext"
 
+    // Save As: writes content to a new URI and makes it the active document.
+    val saveAsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        uri?.let { vm.saveAsUri(it, context.contentResolver) }
+    }
+
     DisposableEffect(distractionFree) {
         var ctx = context
         while (ctx is ContextWrapper && ctx !is Activity) ctx = ctx.baseContext
@@ -930,6 +935,23 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
             onClick = { showMenu = false; cmdMode = !cmdMode },
             trailingIcon = { Text("$keyCmdMode / Alt+C", style = MaterialTheme.typography.labelSmall,
                 color = colorScheme.onSurfaceVariant) }
+        )
+        HorizontalDivider()
+        // — Save —
+        DropdownMenuItem(
+            text = { Text("Sauvegarder", fontFamily = FontFamily.Monospace) },
+            enabled = dirty && fileWritable,
+            onClick = { showMenu = false; vm.saveFile() },
+            trailingIcon = { Text(keySave, style = MaterialTheme.typography.labelSmall,
+                color = colorScheme.onSurfaceVariant) }
+        )
+        DropdownMenuItem(
+            text = { Text("Sauvegarder sous…", fontFamily = FontFamily.Monospace) },
+            enabled = currentFile != null,
+            onClick = {
+                showMenu = false
+                saveAsLauncher.launch(currentFile?.name ?: "untitled.txt")
+            }
         )
         HorizontalDivider()
         // — View —

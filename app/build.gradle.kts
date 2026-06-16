@@ -78,6 +78,12 @@ android {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            applicationVariants.all {
+                outputs.all {
+                    (this as? com.android.build.gradle.internal.api.BaseVariantOutputImpl)
+                        ?.outputFileName = "writhdeck-release.apk"
+                }
+            }
         }
     }
 
@@ -111,3 +117,4 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
+

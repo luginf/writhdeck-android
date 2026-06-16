@@ -6,6 +6,21 @@
 
 
 
-./gradlew assembleDebug 
+ ./gradlew assembleDebug 
+# ./gradlew assembleRelease
+
+# apksigner sign \
+#    --ks writhdeck.jks \
+#    --ks-key-alias writhdeck \
+#    --out writhdeck-release.apk \
+#    app/build/outputs/apk/release/writhdeck-release.apk
+	
+
+
+# ./gradlew bundleRelease  # pour générer .aab 
 
 printf "=>\n\napp/build/outputs/apk/debug/writhdeck-debug.apk \n\n" 
+# printf "=>\n\napp/build/outputs/apk/release/ \n\n" 
+
+
+
