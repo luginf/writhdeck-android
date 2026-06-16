@@ -39,6 +39,7 @@ import android.graphics.Typeface
 import android.os.Environment
 import android.view.textservice.TextServicesManager
 import java.io.File
+import com.writhdeck.app.BUILTIN_SCHEMES
 import com.writhdeck.app.EDITOR_FONTS
 import com.writhdeck.app.SettingsData
 import com.writhdeck.app.WrithdeckViewModel
@@ -273,19 +274,49 @@ private fun SchemesTab(
     onNavigateSchemes: () -> Unit,
     onChange: (SettingsData) -> Unit
 ) {
+    val customSchemes by vm.customSchemes.collectAsStateWithLifecycle()
+    val colors = remember(s.scheme, customSchemes) {
+        customSchemes[s.scheme] ?: BUILTIN_SCHEMES[s.scheme] ?: BUILTIN_SCHEMES["default"]!!
+    }
+
     DropdownSettingRow(
         label = "Scheme",
         selected = s.scheme,
         options = remember { vm.getAllSchemeNames() }
     ) { onChange(s.copy(scheme = it)) }
 
-    Spacer(Modifier.height(8.dp))
+    Row(
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("Dark", style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+        Spacer(Modifier.width(4.dp))
+        listOf(colors.bg, colors.heading, colors.comment, colors.markup).forEach { SchemePreviewSwatch(it) }
+        Spacer(Modifier.width(10.dp))
+        Text("Light", style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+        Spacer(Modifier.width(4.dp))
+        listOf(colors.bgAlt, colors.headingAlt, colors.commentAlt, colors.markupAlt).forEach { SchemePreviewSwatch(it) }
+    }
+
     OutlinedButton(
         onClick = onNavigateSchemes,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
     ) {
         Text("Edit scheme colors", fontFamily = FontFamily.Monospace)
     }
+}
+
+@Composable
+private fun SchemePreviewSwatch(hex: String) {
+    val color = remember(hex) {
+        val s = hex.trim().removePrefix("#")
+        try { if (s.length != 6) Color.Gray else Color(0xFF000000.toInt() or s.toInt(16)) }
+        catch (_: Exception) { Color.Gray }
+    }
+    Box(Modifier.size(18.dp).background(color).border(0.5.dp, Color.Gray.copy(alpha = 0.4f)))
 }
 
 @Composable

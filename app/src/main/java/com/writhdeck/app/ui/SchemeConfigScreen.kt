@@ -155,6 +155,10 @@ private fun SchemeRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(
+                if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+                else Color.Transparent
+            )
             .clickable(onClick = onSelect)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically

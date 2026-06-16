@@ -658,7 +658,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     fun createFile(name: String) {
         viewModelScope.launch(Dispatchers.IO) {
             docsDir.mkdirs()
-            val safeName = if (name.endsWith(".txt") || name.endsWith(".md")) name else "$name.txt"
+            val safeName = if (File(name).extension.isNotEmpty()) name else "$name.txt"
             File(docsDir, safeName).createNewFile()
             refreshDocs()
         }
@@ -667,7 +667,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     fun renameFile(entry: DocEntry, newName: String) {
         viewModelScope.launch {
             val ext = File(entry.path).extension
-            val safeName = if (newName.endsWith(".txt") || newName.endsWith(".md")) newName
+            val safeName = if (File(newName).extension.isNotEmpty()) newName
                            else if (ext.isNotEmpty()) "$newName.$ext" else "$newName.txt"
             val parent = File(entry.path).parentFile ?: docsDir
             val dst = File(parent, safeName)
