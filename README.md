@@ -25,9 +25,17 @@ Pure Kotlin + Jetpack Compose. No Tcl/JNI engine — all logic (config parsing, 
 
 ---
 
-## Requirements
 
-- Android Studio (Ladybug or newer)
+## Get it
+
+- https://github.com/luginf/writhdeck-android/releases
+
+---
+
+
+## Building requirements
+
+- Android Studio (Ladybug or newer) (or use gradle)
 - Android SDK (minSdk 26 / targetSdk 35)
 - No NDK, no native dependencies
 
