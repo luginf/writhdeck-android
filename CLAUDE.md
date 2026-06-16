@@ -193,7 +193,7 @@ No upper limit enforced by the parser — `IniParser.parse()` uses `coerceAtLeas
 
 ### Scratchpad
 
-`openScratchpad()` opens `docsDir/scratchpad.txt` (creates if missing) with cursor restore. Always writable. BrowserScreen shows it as a permanent first item; `t` key shortcut.
+`openScratchpad()` is an **in-memory ephemeral buffer** — no file on disk. Sets `_isScratchpad = true`, `_fileWritable = false`, `_content = ""`, `_currentFile = DocEntry("scratchpad", "")` (empty path sentinel), cursor at 0. Matches Tcl's `open-scratchpad` concept: `::filename = ""`, `::scratchpad = 1`, always starts empty. `saveFile()` is a no-op for scratchpad; user must use "Sauvegarder sous…" to persist content to a real file (after which `_isScratchpad` becomes `false`). BrowserScreen shows it as a permanent first item with `t` shortcut. `_isScratchpad` is saved/restored in `WsSnapshot` for workspace toggle. EditorScreen skips the "[read-only]" label and the read-only alert when `isScratchpad` is true (even though `fileWritable = false`).
 
 ### Color schemes
 

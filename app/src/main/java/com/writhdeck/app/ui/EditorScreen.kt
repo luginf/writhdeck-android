@@ -528,6 +528,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val darkPref by vm.darkModePreference.collectAsStateWithLifecycle()
     val statusBar by vm.statusBar.collectAsStateWithLifecycle()
     val fileWritable by vm.fileWritable.collectAsStateWithLifecycle()
+    val isScratchpad by vm.isScratchpad.collectAsStateWithLifecycle()
     val snackbarMessage by vm.snackbarMessage.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -609,7 +610,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     var showSaveConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(currentFile?.path) {
-        if (!fileWritable && currentFile != null) showReadOnlyAlert = true
+        if (!fileWritable && !isScratchpad && currentFile != null) showReadOnlyAlert = true
     }
 
     fun doBack() {
@@ -925,7 +926,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val titleText = buildString {
         if (wsDualMode) append("[$wsActive] ")
         append(currentFile?.name ?: "Editor")
-        if (!fileWritable) append(" [read-only]") else if (dirty) append(" *")
+        if (!fileWritable && !isScratchpad) append(" [read-only]") else if (dirty) append(" *")
     }
     @Composable
     fun MenuItems() {
@@ -950,7 +951,9 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
             enabled = currentFile != null,
             onClick = {
                 showMenu = false
-                saveAsLauncher.launch(currentFile?.name ?: "untitled.txt")
+                val defaultName = if (isScratchpad) "scratchpad.txt"
+                    else currentFile?.name ?: "untitled.txt"
+                saveAsLauncher.launch(defaultName)
             }
         )
         HorizontalDivider()
@@ -1152,7 +1155,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         )
         DropdownMenuItem(
             text = { Text("File info", fontFamily = FontFamily.Monospace) },
-            enabled = currentFile != null,
+            enabled = currentFile != null && !isScratchpad,
             onClick = { showMenu = false; showFileInfo = true }
         )
         DropdownMenuItem(
@@ -1403,7 +1406,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     // Guard all layout-invalidating calls — avoids scroll jank from timer recompositions.
                     val newStyle = EditorStyle(editorFgInt, fontSize.toFloat(), lineSpacing,
                                                effMarginWidthPx, effMarginHeightPx, effMarginHeightPx + extraBottomPadPx,
-                                               fileWritable, hemingwayActive,
+                                               fileWritable || isScratchpad, hemingwayActive,
                                                fontFamily, fontBold, blockCursor, spellCheckEnabled)
                     if (lastStyle[0] != newStyle) {
                         editText.setTextColor(newStyle.fgColor)

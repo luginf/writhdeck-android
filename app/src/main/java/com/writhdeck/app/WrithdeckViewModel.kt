@@ -38,7 +38,8 @@ data class WsSnapshot(
     val writable: Boolean,
     val extUri: Uri?,
     val extWritable: Boolean,
-    val cursorOffset: Int
+    val cursorOffset: Int,
+    val scratchpad: Boolean = false
 ) {
     companion object { fun empty() = WsSnapshot(null, "", false, 0, true, null, false, 0) }
 }
@@ -213,6 +214,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _fileWritable = MutableStateFlow(true)
     val fileWritable = _fileWritable.asStateFlow()
+
+    private val _isScratchpad = MutableStateFlow(false)
+    val isScratchpad = _isScratchpad.asStateFlow()
 
     private val _customSchemes = MutableStateFlow<Map<String, SchemeColors>>(emptyMap())
     val customSchemes = _customSchemes.asStateFlow()
@@ -601,6 +605,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     fun openFile(entry: DocEntry) {
         viewModelScope.launch {
             val text = withContext(Dispatchers.IO) { File(entry.path).readText() }
+            _isScratchpad.value = false
             externalUri = null
             externalWritable = false
             _fileWritable.value = withContext(Dispatchers.IO) { File(entry.path).canWrite() }
@@ -625,6 +630,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openIniFile() {
         viewModelScope.launch {
+            _isScratchpad.value = false
             val iniFile = File(configDir, "writhdeck.ini")
             configDir.mkdirs()
             val text = withContext(Dispatchers.IO) {
@@ -649,26 +655,18 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openScratchpad() {
-        viewModelScope.launch {
-            val scratchFile = File(docsDir, "scratchpad.txt")
-            val text = withContext(Dispatchers.IO) {
-                if (!scratchFile.exists()) { scratchFile.createNewFile(); "" }
-                else scratchFile.readText()
-            }
-            externalUri = null
-            externalWritable = false
-            _fileWritable.value = true
-            _content.value = text
-            val cursor = appState.cursors[scratchFile.absolutePath]
-            _initialCursorOffset.value = if (cursor != null)
-                linecolToOffset(text, cursor.first, cursor.second) else 0
-            liveCursor = _initialCursorOffset.value
-            _currentFile.value = DocEntry("scratchpad.txt", scratchFile.absolutePath)
-            _dirty.value = false
-            _wordCount.value = countWords(text)
-            refreshStatus()
-            scheduleRebuildToc()
-        }
+        externalUri = null
+        externalWritable = false
+        _isScratchpad.value = true
+        _fileWritable.value = false
+        _content.value = ""
+        _initialCursorOffset.value = 0
+        liveCursor = 0
+        _currentFile.value = DocEntry("scratchpad", "")
+        _dirty.value = false
+        _wordCount.value = 0
+        _toc.value = emptyList()
+        refreshStatus()
     }
 
     private fun refreshRecents() {
@@ -777,6 +775,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openExternalContent(uri: Uri, contentResolver: ContentResolver, canWrite: Boolean) {
         viewModelScope.launch {
+            _isScratchpad.value = false
             val text = withContext(Dispatchers.IO) {
                 contentResolver.openInputStream(uri)?.use { it.bufferedReader().readText() } ?: ""
             }
@@ -836,6 +835,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun saveFile() {
+        if (_isScratchpad.value) return
         val entry = _currentFile.value ?: return
         val uri = externalUri
         if (uri != null && externalWritable) {
@@ -878,6 +878,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 ?.substringAfterLast('/')
                 ?.substringAfterLast(':')
                 ?: "untitled.txt"
+            _isScratchpad.value = false
             externalUri = uri
             externalWritable = true
             _fileWritable.value = true
@@ -929,7 +930,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             file = _currentFile.value, content = _content.value,
             dirty = _dirty.value, wordCount = _wordCount.value,
             writable = _fileWritable.value, extUri = externalUri,
-            extWritable = externalWritable, cursorOffset = cursorOffset
+            extWritable = externalWritable, cursorOffset = cursorOffset,
+            scratchpad = _isScratchpad.value
         )
         val next: WsSnapshot
         if (_wsActive.value == 1) {
@@ -949,6 +951,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _dirty.value = next.dirty
         _wordCount.value = next.wordCount
         _fileWritable.value = next.writable
+        _isScratchpad.value = next.scratchpad
         externalUri = next.extUri
         externalWritable = next.extWritable
         refreshStatus()
