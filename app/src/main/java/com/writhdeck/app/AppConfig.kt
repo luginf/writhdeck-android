@@ -98,6 +98,7 @@ data class AppConfig(
     val lineSpacing: Float = 1.5f,
     val browserFilter: String = "*.txt *.t2t *.md *.ini",
     val browserShowAll: Boolean = false,
+    val browserSubdirs: Boolean = true,
     val spellCheckEnabled: Boolean = true,
     // "system" = let the spell checker service pick its own language (matches the
     // active keyboard/locale); otherwise an explicit BCP-47 tag (e.g. "en-US", "fr-FR")
@@ -407,6 +408,7 @@ object IniParser {
             // Not via str(): an empty filter is a valid "show all" state, distinct from default
             browserFilter    = keys["browser_filter"] ?: "*.txt *.t2t *.md *.ini",
             browserShowAll   = bool("browser_show_all", false),
+            browserSubdirs   = bool("browser_subdirs", true),
             spellCheckEnabled = bool("spell_check", true),
             spellCheckLanguage = str("spell_check_language", "system")
         )
@@ -432,6 +434,8 @@ object IniParser {
             appendLine("browser_filter = ${config.browserFilter}")
             appendLine("% browser_show_all: bypass browser_filter and show all files")
             appendLine("browser_show_all = ${bool(config.browserShowAll)}")
+            appendLine("% browser_subdirs: scan and browse subfolders inside the documents folder")
+            appendLine("browser_subdirs = ${bool(config.browserSubdirs)}")
             appendLine()
             appendLine("= Status bar =")
             appendLine("[status_bar]")

@@ -463,6 +463,7 @@ private fun MiscTab(s: SettingsData, vm: WrithdeckViewModel, onEditIni: () -> Un
     SettingsSection("Browser")
     StringSettingRow("File filter", s.browserFilter) { onChange(s.copy(browserFilter = it)) }
     SwitchSettingRow("Show all files (ignore filter)", s.browserShowAll) { onChange(s.copy(browserShowAll = it)) }
+    SwitchSettingRow("Browse subfolders", s.browserSubdirs) { onChange(s.copy(browserSubdirs = it)) }
 
     SettingsSection("Autosave")
     SwitchSettingRow("Enabled", s.autosaveEnabled) { onChange(s.copy(autosaveEnabled = it)) }

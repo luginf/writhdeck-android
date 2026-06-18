@@ -195,6 +195,13 @@ No upper limit enforced by the parser — `IniParser.parse()` uses `coerceAtLeas
 
 `openScratchpad()` is an **in-memory ephemeral buffer** — no file on disk. Sets `_isScratchpad = true`, `_fileWritable = false`, `_content = ""`, `_currentFile = DocEntry("scratchpad", "")` (empty path sentinel), cursor at 0. Matches Tcl's `open-scratchpad` concept: `::filename = ""`, `::scratchpad = 1`, always starts empty. `saveFile()` is a no-op for scratchpad; user must use "Sauvegarder sous…" to persist content to a real file (after which `_isScratchpad` becomes `false`). BrowserScreen shows it as a permanent first item with `t` shortcut. `_isScratchpad` is saved/restored in `WsSnapshot` for workspace toggle. EditorScreen skips the "[read-only]" label and the read-only alert when `isScratchpad` is true (even though `fileWritable = false`).
 
+### Subfolder navigation (`browser_subdirs`)
+
+Explorer-style browsing of subfolders inside the documents folder. Gated by `config.browserSubdirs` (INI `browser_subdirs`, default `yes`; Misc "Browse subfolders" toggle in `SettingsScreen`). Mirrors the Tcl desktop's optional subfolder navigation.
+
+- **VM state**: `_browserDir: MutableStateFlow<String?>` (null = root dual `docsDir`/`configDir` view; a path = single-folder view), `_subdirs: MutableStateFlow<List<DocEntry>>` (immediate subfolders, `backups` and dotfolders skipped). `enterDir(path)` / `browserUp()` navigate (up returns to root when the parent is `docsDir`/`configDir`). `refreshDocs()` branches on `_browserDir`; `createFile()` creates in the current folder; `applySettings()` resets `_browserDir` to null.
+- **UI** (`BrowserScreen`): at root, a "Folders" section lists `subname/` rows (`FolderNavItem`); inside a subfolder, a breadcrumb header + ".." + folders + files (no Favorites/Recent). Tapping a folder calls `enterDir`; `..` and the system back button (via `BackHandler(enabled = inSubdir)`) call `browserUp`. Folders are tap-only; arrow-key nav (`navEntries`/`navItemIndex`) covers files and accounts for the folder rows.
+
 ### Color schemes
 
 `SchemeColors` has 16 fields (8 dark + 8 light). `BUILTIN_SCHEMES` has 8 built-in schemes. `AppConfig.customSchemes: Map<String, SchemeColors>` holds INI-parsed `[schemes] -> [<name>]` sub-sections; `schemeColors()` checks custom first, then builtins. `SchemeConfigScreen` lists all schemes with color swatches, lets user select the active scheme, edit any scheme (builtin or custom), or create new custom schemes. Custom schemes are persisted via `IniParser.writeCustomScheme`.

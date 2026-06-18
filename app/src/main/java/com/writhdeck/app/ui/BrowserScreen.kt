@@ -1,6 +1,7 @@
 package com.writhdeck.app.ui
 
 import android.content.Intent
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -63,6 +64,9 @@ fun BrowserScreen(
     onRequestPermission: () -> Unit
 ) {
     val docs by vm.docs.collectAsStateWithLifecycle()
+    val subdirs by vm.subdirs.collectAsStateWithLifecycle()
+    val browserDir by vm.browserDir.collectAsStateWithLifecycle()
+    val inSubdir = browserDir != null
     val recentDocs by vm.recentDocs.collectAsStateWithLifecycle()
     val favoriteDocs by vm.favoriteDocs.collectAsStateWithLifecycle()
     val storageGranted by vm.storagePermissionGranted.collectAsStateWithLifecycle()
@@ -128,18 +132,32 @@ fun BrowserScreen(
     // ArrowUp/ArrowDown handling of `.br-nav-item` rows (ordered Favorites -> Documents -> Recent).
     val listState = rememberLazyListState()
     val navScope = rememberCoroutineScope()
-    val navEntries = favoriteDocs + docs + recentOnly
+    // Folders are tap-only; arrow keys navigate files (Favorites -> Documents -> Recent,
+    // or just the current folder's files when inside a subfolder).
+    val navEntries = if (inSubdir) docs else favoriteDocs + docs + recentOnly
 
     // Absolute LazyColumn item index for `entry` — must mirror the `item`/`items` emission
-    // order in the LazyColumn below (scratchpad, permission banner, Favorites, Documents, Recent).
+    // order in the LazyColumn below (scratchpad, permission banner, then either the
+    // single-folder view or Favorites/Folders/Documents/Recent at the root).
     fun navItemIndex(entry: DocEntry): Int {
         var idx = 1 // scratchpad row
         if (!storageGranted && !permissionBannerDismissed) idx++
+        if (inSubdir) {
+            idx++           // breadcrumb header
+            idx++           // ".." row
+            idx += subdirs.size
+            val i = docs.indexOfFirst { it.path == entry.path }
+            return if (i >= 0) idx + i else idx
+        }
         if (favoriteDocs.isNotEmpty()) {
             idx++
             val i = favoriteDocs.indexOfFirst { it.path == entry.path }
             if (i >= 0) return idx + i
             idx += favoriteDocs.size
+        }
+        if (subdirs.isNotEmpty()) {
+            idx++ // "Folders" header
+            idx += subdirs.size
         }
         idx++ // "Documents" header
         if (docs.isEmpty()) {
@@ -156,6 +174,9 @@ fun BrowserScreen(
         }
         return idx
     }
+
+    // System back goes up one folder while navigating subfolders.
+    BackHandler(enabled = inSubdir) { selectedEntry = null; vm.browserUp() }
 
     fun navMove(delta: Int) {
         if (navEntries.isEmpty()) return
@@ -323,64 +344,81 @@ fun BrowserScreen(
                         }
                     }
 
-                    // Favorites section
-                    if (favoriteDocs.isNotEmpty()) {
-                        item { SectionHeader("Favorites") }
-                        items(favoriteDocs, key = { "fav_${it.path}" }) { entry ->
-                            DocListItem(
-                                entry = entry,
-                                isFavorite = true,
-                                isSelected = selectedEntry?.path == entry.path,
-                                onClick = { selectedEntry = entry; imeAllowed = false; onOpenFile(entry) },
-                                onLongClick = { selectedEntry = entry; contextEntry = entry; showContextMenu = true },
-                                onToggleFavorite = { selectedEntry = entry; vm.toggleFavorite(entry) }
-                            )
+                    if (inSubdir) {
+                        // Single-folder navigation view (breadcrumb, "..", folders, files)
+                        item { SectionHeader(browserDir?.let { File(it).name } ?: "") }
+                        item { FolderNavItem(label = "..", onClick = { selectedEntry = null; vm.browserUp() }) }
+                        items(subdirs, key = { "dir_${it.path}" }) { d ->
+                            FolderNavItem(label = "${d.name}/", onClick = { selectedEntry = null; vm.enterDir(d.path) })
                         }
-                    }
-
-                    // Documents section
-                    item { SectionHeader("Documents") }
-                    if (docs.isEmpty()) {
-                        item {
-                            Box(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                                contentAlignment = Alignment.CenterStart
-                            ) {
-                                Text(
-                                    "No documents yet. Tap + to create one.",
-                                    fontFamily = FontFamily.Monospace,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                        if (docs.isEmpty()) {
+                            item { EmptyDocsRow() }
+                        } else {
+                            items(docs, key = { it.path }) { entry ->
+                                DocListItem(
+                                    entry = entry,
+                                    isFavorite = entry.path in favPaths,
+                                    isSelected = selectedEntry?.path == entry.path,
+                                    onClick = { selectedEntry = entry; imeAllowed = false; onOpenFile(entry) },
+                                    onLongClick = { selectedEntry = entry; contextEntry = entry; showContextMenu = true },
+                                    onToggleFavorite = { selectedEntry = entry; vm.toggleFavorite(entry) }
                                 )
                             }
                         }
                     } else {
-                        items(docs, key = { it.path }) { entry ->
-                            DocListItem(
-                                entry = entry,
-                                isFavorite = entry.path in favPaths,
-                                isSelected = selectedEntry?.path == entry.path,
-                                onClick = { selectedEntry = entry; imeAllowed = false; onOpenFile(entry) },
-                                onLongClick = { selectedEntry = entry; contextEntry = entry; showContextMenu = true },
-                                onToggleFavorite = { selectedEntry = entry; vm.toggleFavorite(entry) }
-                            )
+                        // Favorites section
+                        if (favoriteDocs.isNotEmpty()) {
+                            item { SectionHeader("Favorites") }
+                            items(favoriteDocs, key = { "fav_${it.path}" }) { entry ->
+                                DocListItem(
+                                    entry = entry,
+                                    isFavorite = true,
+                                    isSelected = selectedEntry?.path == entry.path,
+                                    onClick = { selectedEntry = entry; imeAllowed = false; onOpenFile(entry) },
+                                    onLongClick = { selectedEntry = entry; contextEntry = entry; showContextMenu = true },
+                                    onToggleFavorite = { selectedEntry = entry; vm.toggleFavorite(entry) }
+                                )
+                            }
                         }
-                    }
 
-                    // Recent section
-                    if (recentOnly.isNotEmpty()) {
-                        item { SectionHeader("Recent") }
-                        items(recentOnly, key = { "recent_${it.path}" }) { entry ->
-                            DocListItem(
-                                entry = entry,
-                                isFavorite = entry.path in favPaths,
-                                isSelected = selectedEntry?.path == entry.path,
-                                onClick = { selectedEntry = entry; imeAllowed = false; onOpenFile(entry) },
-                                onLongClick = { selectedEntry = entry; contextEntry = entry; showContextMenu = true },
-                                onToggleFavorite = { selectedEntry = entry; vm.toggleFavorite(entry) }
-                            )
+                        // Folders section (subfolders of the documents folder)
+                        if (subdirs.isNotEmpty()) {
+                            item { SectionHeader("Folders") }
+                            items(subdirs, key = { "dir_${it.path}" }) { d ->
+                                FolderNavItem(label = "${d.name}/", onClick = { selectedEntry = null; vm.enterDir(d.path) })
+                            }
+                        }
+
+                        // Documents section
+                        item { SectionHeader("Documents") }
+                        if (docs.isEmpty()) {
+                            item { EmptyDocsRow() }
+                        } else {
+                            items(docs, key = { it.path }) { entry ->
+                                DocListItem(
+                                    entry = entry,
+                                    isFavorite = entry.path in favPaths,
+                                    isSelected = selectedEntry?.path == entry.path,
+                                    onClick = { selectedEntry = entry; imeAllowed = false; onOpenFile(entry) },
+                                    onLongClick = { selectedEntry = entry; contextEntry = entry; showContextMenu = true },
+                                    onToggleFavorite = { selectedEntry = entry; vm.toggleFavorite(entry) }
+                                )
+                            }
+                        }
+
+                        // Recent section
+                        if (recentOnly.isNotEmpty()) {
+                            item { SectionHeader("Recent") }
+                            items(recentOnly, key = { "recent_${it.path}" }) { entry ->
+                                DocListItem(
+                                    entry = entry,
+                                    isFavorite = entry.path in favPaths,
+                                    isSelected = selectedEntry?.path == entry.path,
+                                    onClick = { selectedEntry = entry; imeAllowed = false; onOpenFile(entry) },
+                                    onLongClick = { selectedEntry = entry; contextEntry = entry; showContextMenu = true },
+                                    onToggleFavorite = { selectedEntry = entry; vm.toggleFavorite(entry) }
+                                )
+                            }
                         }
                     }
 
@@ -630,6 +668,49 @@ private fun SectionHeader(title: String) {
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp)
     )
+}
+
+@Composable
+private fun EmptyDocsRow() {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Text(
+            "No documents yet. Tap + to create one.",
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun FolderNavItem(label: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            Icons.Filled.FolderOpen,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(20.dp)
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = label,
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f).padding(vertical = 8.dp)
+        )
+    }
+    HorizontalDivider()
 }
 
 @OptIn(ExperimentalFoundationApi::class)

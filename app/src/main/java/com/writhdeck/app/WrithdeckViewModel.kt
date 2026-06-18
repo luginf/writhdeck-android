@@ -74,6 +74,7 @@ data class SettingsData(
     val lineSpacing: Float = 1.5f,
     val browserFilter: String = "*.txt *.t2t *.md *.ini",
     val browserShowAll: Boolean = false,
+    val browserSubdirs: Boolean = true,
     val docsCustomDir: String = "",
     val spellCheckEnabled: Boolean = true,
     val spellCheckLanguage: String = "system",
@@ -113,6 +114,14 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _docs = MutableStateFlow<List<DocEntry>>(emptyList())
     val docs = _docs.asStateFlow()
+
+    // Subfolder navigation (optional, gated by config.browserSubdirs). _browserDir
+    // is null at the root (dual docsDir/configDir view) or a subfolder path for a
+    // single-folder view; _subdirs holds the immediate subfolders of that folder.
+    private val _subdirs = MutableStateFlow<List<DocEntry>>(emptyList())
+    val subdirs = _subdirs.asStateFlow()
+    private val _browserDir = MutableStateFlow<String?>(null)
+    val browserDir = _browserDir.asStateFlow()
 
     private val _recentDocs = MutableStateFlow<List<DocEntry>>(emptyList())
     val recentDocs = _recentDocs.asStateFlow()
@@ -459,16 +468,49 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshDocs() {
         viewModelScope.launch(Dispatchers.IO) {
             docsDir.mkdirs()
-            // If a custom docs folder is set, also list configDir (where writhdeck.ini and
-            // .writhdeck.json live) so those files don't disappear from the browser —
-            // mirrors the Tcl desktop's DOCS_DIR/DOCS_DIR_DEFAULT dual-listing.
-            val dirs = if (docsDir.absolutePath != configDir.absolutePath) listOf(docsDir, configDir) else listOf(docsDir)
-            val files = dirs
-                .flatMap { dir -> dir.listFiles { f -> f.isFile && config.matchesBrowserFilter(f.name) }?.toList() ?: emptyList() }
-                .sortedByDescending { it.lastModified() }
-                .map { DocEntry(it.name, it.absolutePath) }
-            _docs.value = files
+            // Reset to root if subfolder navigation was turned off while inside one.
+            if (!config.browserSubdirs && _browserDir.value != null) _browserDir.value = null
+            val cwd = _browserDir.value
+            fun subdirsOf(dir: File): List<DocEntry> =
+                if (!config.browserSubdirs) emptyList()
+                else dir.listFiles { f -> f.isDirectory && f.name != "backups" && !f.name.startsWith(".") }
+                    ?.toList().orEmpty()
+                    .sortedBy { it.name.lowercase() }
+                    .map { DocEntry(it.name, it.absolutePath) }
+
+            if (config.browserSubdirs && cwd != null) {
+                // Single-folder navigation view.
+                val dir = File(cwd)
+                _docs.value = (dir.listFiles { f -> f.isFile && config.matchesBrowserFilter(f.name) }?.toList() ?: emptyList())
+                    .sortedByDescending { it.lastModified() }
+                    .map { DocEntry(it.name, it.absolutePath) }
+                _subdirs.value = subdirsOf(dir)
+            } else {
+                // Root view. If a custom docs folder is set, also list configDir (where
+                // writhdeck.ini and .writhdeck.json live) so those files don't disappear
+                // from the browser — mirrors the Tcl desktop's DOCS_DIR/DOCS_DIR_DEFAULT dual-listing.
+                val dirs = if (docsDir.absolutePath != configDir.absolutePath) listOf(docsDir, configDir) else listOf(docsDir)
+                _docs.value = dirs
+                    .flatMap { dir -> dir.listFiles { f -> f.isFile && config.matchesBrowserFilter(f.name) }?.toList() ?: emptyList() }
+                    .sortedByDescending { it.lastModified() }
+                    .map { DocEntry(it.name, it.absolutePath) }
+                _subdirs.value = subdirsOf(docsDir)
+            }
         }
+    }
+
+    /** Enter a subfolder (subfolder navigation). */
+    fun enterDir(path: String) {
+        _browserDir.value = path
+        refreshDocs()
+    }
+
+    /** Go up one folder; back to the root view when leaving the top docs folder. */
+    fun browserUp() {
+        val cwd = _browserDir.value ?: return
+        val parent = File(cwd).parentFile?.absolutePath
+        _browserDir.value = if (parent == null || parent == docsDir.absolutePath || parent == configDir.absolutePath) null else parent
+        refreshDocs()
     }
 
     fun refreshFavorites() {
@@ -699,9 +741,10 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
 
     fun createFile(name: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            docsDir.mkdirs()
+            val dir = _browserDir.value?.let { File(it) } ?: docsDir
+            dir.mkdirs()
             val safeName = if (File(name).extension.isNotEmpty()) name else "$name.txt"
-            File(docsDir, safeName).createNewFile()
+            File(dir, safeName).createNewFile()
             refreshDocs()
         }
     }
@@ -1101,6 +1144,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         lineSpacing      = config.lineSpacing,
         browserFilter    = config.browserFilter,
         browserShowAll   = config.browserShowAll,
+        browserSubdirs   = config.browserSubdirs,
         docsCustomDir    = config.docsCustomDir,
         spellCheckEnabled = config.spellCheckEnabled,
         spellCheckLanguage = config.spellCheckLanguage,
@@ -1138,12 +1182,14 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             lineSpacing      = s.lineSpacing,
             browserFilter    = s.browserFilter,
             browserShowAll   = s.browserShowAll,
+            browserSubdirs   = s.browserSubdirs,
             docsCustomDir    = s.docsCustomDir,
             spellCheckEnabled  = s.spellCheckEnabled,
             spellCheckLanguage = s.spellCheckLanguage,
             androidDarkMode    = s.androidDarkMode
         )
         applyConfig()
+        _browserDir.value = null   // docs folder / subdir setting may have changed
         refreshDocs()
         val activeProfile = config.activeProfile
         viewModelScope.launch(Dispatchers.IO) {
@@ -1169,6 +1215,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 "hemingway_mode"    to b(s.hemingwayMode),
                 "browser_filter"    to s.browserFilter,
                 "browser_show_all"  to b(s.browserShowAll),
+                "browser_subdirs"   to b(s.browserSubdirs),
                 "docs_dir"          to s.docsCustomDir,
                 "spell_check"       to b(s.spellCheckEnabled),
                 "spell_check_language" to s.spellCheckLanguage
