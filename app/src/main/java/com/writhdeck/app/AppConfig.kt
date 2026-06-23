@@ -393,7 +393,9 @@ object IniParser {
             customSchemes    = customSchemes,
             fontSize         = int("font_size", 16).coerceIn(10, 32),
             fontFamily       = str("font_family", "monospace").let {
-                if (it in EDITOR_FONTS.map { f -> f.familyName }) it else "monospace"
+                // Accept built-in generic aliases or a user font file (a `.ttf`/`.otf`
+                // dropped in <configDir>/fonts/ — resolved at render time by FontManager).
+                if (it in EDITOR_FONTS.map { f -> f.familyName } || FontManager.isUserFont(it)) it else "monospace"
             },
             fontBold         = bool("font_bold", false),
             blockCursor      = bool("block_cursor", false),

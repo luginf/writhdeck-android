@@ -105,6 +105,16 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         return if (custom.isNotEmpty() && _storagePermissionGranted.value) File(custom) else configDir
     }
 
+    // User fonts folder — drop .ttf/.otf files here and they appear in the Fonts tab.
+    // Primary location lives next to writhdeck.ini (configDir), auto-created on first run.
+    val fontsDir: File get() = File(configDir, "fonts")
+
+    // All folders scanned for user fonts: the primary configDir/fonts plus, when a custom
+    // documents folder is set, docsDir/fonts — so fonts can also be kept alongside documents.
+    // configDir wins on a filename collision (listed first). De-duplicated by absolute path.
+    val fontDirs: List<File> get() =
+        listOf(fontsDir, File(docsDir, "fonts")).distinctBy { it.absolutePath }
+
     private var config = AppConfig()
     private var appState = AppState()
     private lateinit var stateFile: File
@@ -189,6 +199,8 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     val fontSize = _fontSize.asStateFlow()
     private val _fontFamily = MutableStateFlow("monospace")
     val fontFamily = _fontFamily.asStateFlow()
+    private val _userFonts = MutableStateFlow<List<EditorFont>>(emptyList())
+    val userFonts = _userFonts.asStateFlow()
     private val _fontBold = MutableStateFlow(false)
     val fontBold = _fontBold.asStateFlow()
 
@@ -313,6 +325,21 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         refreshFavorites()
         refreshRecents()
         refreshStatus()
+        refreshUserFonts()
+    }
+
+    /** Re-scans [fontsDir] for user-supplied `.ttf`/`.otf` files (creating the folder on
+     *  first run so the user has somewhere to drop them) and publishes the result to
+     *  [userFonts]. Called at startup and whenever the Settings screen opens. */
+    fun refreshUserFonts() {
+        viewModelScope.launch {
+            _userFonts.value = withContext(Dispatchers.IO) {
+                // Auto-create only the primary folder; docsDir/fonts is scanned if the user
+                // made it, but we don't clutter their documents folder by creating it.
+                fontsDir.also { runCatching { it.mkdirs() } }
+                FontManager.listUserFonts(fontDirs)
+            }
+        }
     }
 
     private fun applyConfig() {

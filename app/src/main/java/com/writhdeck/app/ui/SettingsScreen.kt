@@ -43,6 +43,8 @@ import android.view.textservice.TextServicesManager
 import java.io.File
 import com.writhdeck.app.BUILTIN_SCHEMES
 import com.writhdeck.app.EDITOR_FONTS
+import com.writhdeck.app.EditorFont
+import com.writhdeck.app.FontManager
 import com.writhdeck.app.SettingsData
 import com.writhdeck.app.WrithdeckViewModel
 
@@ -60,6 +62,11 @@ fun SettingsScreen(
     val activeScheme by vm.activeScheme.collectAsStateWithLifecycle()
     val activeProfile by vm.activeProfile.collectAsStateWithLifecycle()
     val profileNames by vm.profileNames.collectAsStateWithLifecycle()
+    // Rescan the user fonts folder each time Settings opens, so newly dropped .ttf/.otf
+    // files show up in the Fonts tab without an app restart.
+    LaunchedEffect(Unit) { vm.refreshUserFonts() }
+    val userFonts by vm.userFonts.collectAsStateWithLifecycle()
+    val fonts = remember(userFonts) { EDITOR_FONTS + userFonts }
     // Re-read when activeScheme/activeProfile changes (e.g., user picked a scheme in
     // SchemeConfigScreen and came back, or switched profile — profile sections override
     // margins/word goal/scheme/etc., so the whole settings snapshot must be refreshed)
@@ -114,7 +121,7 @@ fun SettingsScreen(
                         onDeleteProfile = { vm.deleteProfile() }
                     ) { s = it }
                     1 -> DisplayTab(s) { s = it }
-                    2 -> FontsTab(s) { s = it }
+                    2 -> FontsTab(s, fonts, vm.fontDirs) { s = it }
                     3 -> SchemesTab(s, vm, onNavigateSchemes = { vm.applySettings(s); onNavigateSchemes() }) { s = it }
                     4 -> TimerTab(s) { s = it }
                     5 -> MiscTab(s, vm, onEditIni = { vm.applySettings(s); onEditIni() }) { s = it }
@@ -261,20 +268,27 @@ private fun DisplayTab(s: SettingsData, onChange: (SettingsData) -> Unit) {
 }
 
 @Composable
-private fun FontsTab(s: SettingsData, onChange: (SettingsData) -> Unit) {
+private fun FontsTab(s: SettingsData, fonts: List<EditorFont>, fontDirs: List<File>, onChange: (SettingsData) -> Unit) {
     IntSettingRow("Font size", s.fontSize, 10, 32) { onChange(s.copy(fontSize = it)) }
-    FontFamilySettingRow(s.fontFamily) { onChange(s.copy(fontFamily = it)) }
+    FontFamilySettingRow(s.fontFamily, fonts, fontDirs) { onChange(s.copy(fontFamily = it)) }
     SwitchSettingRow("Bold", s.fontBold) { onChange(s.copy(fontBold = it)) }
-    FontPreview(s.fontFamily, s.fontSize, s.fontBold)
+    FontPreview(s.fontFamily, s.fontSize, s.fontBold, fontDirs)
+    Text(
+        text = "Custom fonts: drop .ttf/.otf files in\n" +
+            fontDirs.joinToString("\n") { it.absolutePath },
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+    )
 }
 
 /** Live sample of the editor font — same family/size/weight the editor will use. */
 @Composable
-private fun FontPreview(familyName: String, fontSizeSp: Int, bold: Boolean) {
+private fun FontPreview(familyName: String, fontSizeSp: Int, bold: Boolean, fontDirs: List<File>) {
     val style = if (bold) Typeface.BOLD else Typeface.NORMAL
     Text(
         text = "The quick brown fox jumps over the lazy dog — 0123456789",
-        fontFamily = remember(familyName, style) { FontFamily(Typeface.create(familyName, style)) },
+        fontFamily = remember(familyName, style) { FontFamily(FontManager.resolveTypeface(fontDirs, familyName, style)) },
         fontSize = fontSizeSp.sp,
         fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
         modifier = Modifier
@@ -290,9 +304,9 @@ private fun FontPreview(familyName: String, fontSizeSp: Int, bold: Boolean) {
  *  serif and sans-serif faces. Each entry previews in its own typeface. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun FontFamilySettingRow(selected: String, onChange: (String) -> Unit) {
+private fun FontFamilySettingRow(selected: String, fonts: List<EditorFont>, fontDirs: List<File>, onChange: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
-    val current = remember(selected) { EDITOR_FONTS.firstOrNull { it.familyName == selected } ?: EDITOR_FONTS[0] }
+    val current = remember(selected, fonts) { fonts.firstOrNull { it.familyName == selected } ?: fonts[0] }
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
     Row(
@@ -308,13 +322,13 @@ private fun FontFamilySettingRow(selected: String, onChange: (String) -> Unit) {
                         true
                     }
                     Key.DirectionDown -> {
-                        val i = EDITOR_FONTS.indexOf(current)
-                        onChange(EDITOR_FONTS[(i + 1).mod(EDITOR_FONTS.size)].familyName)
+                        val i = fonts.indexOf(current)
+                        onChange(fonts[(i + 1).mod(fonts.size)].familyName)
                         true
                     }
                     Key.DirectionUp -> {
-                        val i = EDITOR_FONTS.indexOf(current)
-                        onChange(EDITOR_FONTS[(i - 1).mod(EDITOR_FONTS.size)].familyName)
+                        val i = fonts.indexOf(current)
+                        onChange(fonts[(i - 1).mod(fonts.size)].familyName)
                         true
                     }
                     Key.Escape -> if (expanded) { expanded = false; true } else false
@@ -344,19 +358,19 @@ private fun FontFamilySettingRow(selected: String, onChange: (String) -> Unit) {
                     .menuAnchor(type = MenuAnchorType.PrimaryNotEditable)
                     .focusProperties { canFocus = false },
                 textStyle = MaterialTheme.typography.bodyMedium.copy(
-                    fontFamily = FontFamily(Typeface.create(current.familyName, Typeface.NORMAL))
+                    fontFamily = FontFamily(FontManager.resolveTypeface(fontDirs, current.familyName, Typeface.NORMAL))
                 )
             )
             ExposedDropdownMenu(
                 expanded = expanded,
                 onDismissRequest = { expanded = false }
             ) {
-                EDITOR_FONTS.forEach { font ->
+                fonts.forEach { font ->
                     DropdownMenuItem(
                         text = {
                             Text(
                                 font.label,
-                                fontFamily = FontFamily(Typeface.create(font.familyName, Typeface.NORMAL)),
+                                fontFamily = FontFamily(FontManager.resolveTypeface(fontDirs, font.familyName, Typeface.NORMAL)),
                                 style = MaterialTheme.typography.bodyMedium
                             )
                         },

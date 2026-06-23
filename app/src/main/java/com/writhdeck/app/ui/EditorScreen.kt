@@ -80,6 +80,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.writhdeck.app.FontManager
 import com.writhdeck.app.StatEntry
 import com.writhdeck.app.TocEntry
 import com.writhdeck.app.WrithdeckViewModel
@@ -1330,7 +1331,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     update = { tv ->
                         tv.text = lineNumbersText
                         tv.setTextColor(cmtColorInt)
-                        tv.typeface = Typeface.create(fontFamily, if (fontBold) Typeface.BOLD else Typeface.NORMAL)
+                        tv.typeface = FontManager.resolveTypeface(vm.fontDirs, fontFamily, if (fontBold) Typeface.BOLD else Typeface.NORMAL)
                         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize.toFloat())
                         tv.setLineSpacing(0f, lineSpacing)
                         tv.setPadding(gutterPadX, effMarginHeightPx, gutterPadX, effMarginHeightPx)
@@ -1344,7 +1345,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     FlingEditText(ctx).apply {
                         inputType = BASE_INPUT_TYPE
                         imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN
-                        typeface = Typeface.create(fontFamily, if (fontBold) Typeface.BOLD else Typeface.NORMAL)
+                        typeface = FontManager.resolveTypeface(vm.fontDirs, fontFamily, if (fontBold) Typeface.BOLD else Typeface.NORMAL)
                         gravity = Gravity.TOP or Gravity.START
                         setBackgroundColor(android.graphics.Color.TRANSPARENT)
                         isSingleLine = false
@@ -1411,7 +1412,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     if (lastStyle[0] != newStyle) {
                         editText.setTextColor(newStyle.fgColor)
                         if (newStyle.fontFamily != lastStyle[0].fontFamily || newStyle.fontBold != lastStyle[0].fontBold) {
-                            editText.typeface = Typeface.create(newStyle.fontFamily,
+                            editText.typeface = FontManager.resolveTypeface(vm.fontDirs, newStyle.fontFamily,
                                 if (newStyle.fontBold) Typeface.BOLD else Typeface.NORMAL)
                         }
                         editText.setTextSize(TypedValue.COMPLEX_UNIT_SP, newStyle.fontSizeSp)
