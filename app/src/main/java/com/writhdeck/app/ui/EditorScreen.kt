@@ -1,11 +1,12 @@
 package com.writhdeck.app.ui
 
 import android.app.Activity
+import com.writhdeck.app.BuildConfig
 import android.content.Context
 import android.content.ContextWrapper
+import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
-import android.os.Build
 import android.text.Editable
 import android.text.Spannable
 import android.text.TextWatcher
@@ -69,6 +70,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -81,6 +83,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.writhdeck.app.FontManager
+import com.writhdeck.app.R
 import com.writhdeck.app.StatEntry
 import com.writhdeck.app.TocEntry
 import com.writhdeck.app.WrithdeckViewModel
@@ -117,13 +120,122 @@ private class SpellErrorSpan(context: Context, suggestions: Array<String>) :
  *  large files (500K+ chars) slow again — so fling is implemented here instead by
  *  driving the EditText's own `scrollY` with an OverScroller, exactly like ScrollView
  *  does internally. */
+private const val BLINK_MS = 500L
+
 private class FlingEditText(context: Context) : EditText(context) {
     private val scroller = OverScroller(context)
     var selectionChangeListener: (() -> Unit)? = null
 
+    // Caret drawn ourselves in onDraw rather than relying on the native caret, for two
+    // reasons:
+    //  - block cursor (terminal-style): sized to the exact width of the glyph under the
+    //    caret (proportional fonts) and inverting that glyph (drawn in the background
+    //    colour over the filled block), the way Tk's -blockcursor does — a fixed-width
+    //    textCursorDrawable couldn't do either (too wide on narrow chars/spaces, opaque
+    //    rectangle hiding the letter);
+    //  - normal caret: the native one is a ~1px hairline that's almost invisible, so we
+    //    draw a thicker (2dp) bar in the foreground colour instead.
+    // The caret is confined to the glyph box (baseline + ascent..descent), not the full
+    // line height, so it never spills into the inter-line gap (line_spacing). Blinking is
+    // opt-in (cursor_blink, off by default) — when off the caret is steady and always on.
+    private var blockCursorOn = false
+    private var blockCursorFill = 0
+    private var blockCursorTextColor = 0
+    private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val caretWidthPx = (2f * resources.displayMetrics.density).coerceAtLeast(2f)
+
+    private var blinkEnabled = false
+    private var caretShown = true
+    private val blinkRunnable = object : Runnable {
+        override fun run() {
+            caretShown = !caretShown
+            invalidate()
+            postDelayed(this, BLINK_MS)
+        }
+    }
+
+    private fun restartBlink() {
+        removeCallbacks(blinkRunnable)
+        caretShown = true
+        if (blinkEnabled && isFocused) postDelayed(blinkRunnable, BLINK_MS)
+    }
+
+    fun setBlockCursor(enabled: Boolean, fillColor: Int, textColor: Int) {
+        blockCursorOn = enabled
+        blockCursorFill = fillColor
+        blockCursorTextColor = textColor
+        // We always draw the caret ourselves (block or thick bar) — hide the native one.
+        isCursorVisible = false
+        invalidate()
+    }
+
+    fun setCursorBlink(enabled: Boolean) {
+        if (blinkEnabled == enabled) return
+        blinkEnabled = enabled
+        restartBlink()
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        if (!isFocused) return
+        if (blinkEnabled && !caretShown) return
+        // Only a collapsed caret is drawn; a range selection uses the normal highlight.
+        val pos = selectionStart
+        if (pos < 0 || pos != selectionEnd) return
+        val l = layout ?: return
+        val line = l.getLineForOffset(pos)
+        // Confine to the glyph box around the baseline (excludes line_spacing leading).
+        val baseline = l.getLineBaseline(line).toFloat()
+        val fm = paint.fontMetrics
+        val top = baseline + fm.ascent
+        val bottom = baseline + fm.descent
+        val left = l.getPrimaryHorizontal(pos)
+
+        canvas.save()
+        canvas.translate(totalPaddingLeft.toFloat(), totalPaddingTop.toFloat())
+        if (blockCursorOn) {
+            val text = text
+            // Width = the glyph under the caret, unless we're at end-of-line / end-of-text /
+            // before a newline (no glyph to cover) — then fall back to an em width.
+            val hasGlyph = text != null && pos < text.length && text[pos] != '\n' &&
+                l.getLineForOffset(pos + 1) == line
+            // No glyph to cover (end-of-line/text, before a newline): use a representative
+            // average-width char ("e") rather than the widest ("M"), which looked square.
+            val right = if (hasGlyph) l.getPrimaryHorizontal(pos + 1) else left + paint.measureText("e")
+            cursorPaint.set(paint)
+            cursorPaint.color = blockCursorFill
+            canvas.drawRect(left, top, right, bottom, cursorPaint)
+            if (hasGlyph) {
+                // Redraw the covered glyph in the background colour → inverted look.
+                cursorPaint.color = blockCursorTextColor
+                canvas.drawText(text!!, pos, pos + 1, left, baseline, cursorPaint)
+            }
+        } else {
+            // Normal caret — a thicker, clearly visible bar in the foreground colour.
+            cursorPaint.set(paint)
+            cursorPaint.color = blockCursorFill
+            canvas.drawRect(left, top, left + caretWidthPx, bottom, cursorPaint)
+        }
+        canvas.restore()
+    }
+
     override fun onSelectionChanged(selStart: Int, selEnd: Int) {
         super.onSelectionChanged(selStart, selEnd)
+        restartBlink()   // keep the caret solid right after it moves
+        invalidate()
         selectionChangeListener?.invoke()
+    }
+
+    override fun onFocusChanged(focused: Boolean, direction: Int, previouslyFocusedRect: android.graphics.Rect?) {
+        super.onFocusChanged(focused, direction, previouslyFocusedRect)
+        restartBlink()
+        invalidate()
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        removeCallbacks(blinkRunnable)
     }
 
     /** Typewriter mode: scroll so the line containing the cursor is vertically centred. */
@@ -442,11 +554,26 @@ fun computeSectionAnalysis(toc: List<TocEntry>, content: String): List<SectionAn
 
 // Tappable shortcuts shown in the command-mode bar — mirrors the `when` switch
 // in performCmdAction(letter), one entry per supported one-letter action.
-private val CMD_ACTIONS = listOf(
-    'f' to "find", 'r' to "replace", 'g' to "goto", 'n' to "line#",
-    'd' to "dark", 'o' to "toc", 'w' to "typewriter", 't' to "timer",
-    's' to "stats", 'a' to "analyse", 'm' to "menu", 'c' to "settings", 'q' to "close"
-)
+// Letters are fixed action codes (not translated); labels are resolved via
+// stringResource at the call site (see cmdActionLabelRes below).
+private val CMD_ACTION_LETTERS = listOf('f', 'r', 'g', 'n', 'd', 'o', 'w', 't', 's', 'a', 'm', 'c', 'q')
+
+private fun cmdActionLabelRes(letter: Char): Int = when (letter) {
+    'f' -> R.string.editor_cmd_action_find
+    'r' -> R.string.editor_cmd_action_replace
+    'g' -> R.string.editor_cmd_action_goto
+    'n' -> R.string.editor_cmd_action_line_number
+    'd' -> R.string.editor_cmd_action_dark
+    'o' -> R.string.editor_cmd_action_toc
+    'w' -> R.string.editor_cmd_action_typewriter
+    't' -> R.string.editor_cmd_action_timer
+    's' -> R.string.editor_cmd_action_stats
+    'a' -> R.string.editor_cmd_action_analyse
+    'm' -> R.string.editor_cmd_action_menu
+    'c' -> R.string.editor_cmd_action_settings
+    'q' -> R.string.editor_cmd_action_close
+    else -> R.string.editor_cmd_action_find
+}
 
 private const val BASE_INPUT_TYPE = android.text.InputType.TYPE_CLASS_TEXT or
     android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
@@ -467,9 +594,10 @@ private const val MENU_ID_STRIKE = Menu.FIRST + 8
 private const val MENU_ID_SPELLCHECK = Menu.FIRST + 9
 
 private data class EditorStyle(
-    val fgColor: Int, val fontSizeSp: Float, val lineSpacingMult: Float,
+    val fgColor: Int, val bgColor: Int, val fontSizeSp: Float, val lineSpacingMult: Float,
     val padX: Int, val padY: Int, val padBottom: Int, val writable: Boolean, val hemingway: Boolean,
-    val fontFamily: String, val fontBold: Boolean, val blockCursor: Boolean, val spellCheckEnabled: Boolean
+    val fontFamily: String, val fontBold: Boolean, val blockCursor: Boolean, val cursorBlink: Boolean,
+    val spellCheckEnabled: Boolean
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -501,6 +629,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val fontFamily by vm.fontFamily.collectAsStateWithLifecycle()
     val fontBold by vm.fontBold.collectAsStateWithLifecycle()
     val blockCursor by vm.blockCursor.collectAsStateWithLifecycle()
+    val cursorBlink by vm.cursorBlink.collectAsStateWithLifecycle()
     val spellCheckEnabled by vm.spellCheckEnabled.collectAsStateWithLifecycle()
     val spellCheckLanguage by vm.spellCheckLanguage.collectAsStateWithLifecycle()
     val lineSpacing by vm.lineSpacing.collectAsStateWithLifecycle()
@@ -553,6 +682,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val editorBg = if (hasTclColors) bgColor else colorScheme.background
     val editorFg = if (hasTclColors) fgColor else colorScheme.onSurface
     val editorFgInt = editorFg.toArgb()
+    val editorBgInt = editorBg.toArgb()
     val hdColorInt = if (hdColor != Color.Unspecified) hdColor.toArgb() else 0
     val cmtColorInt = if (cmtColor != Color.Unspecified) cmtColor.toArgb() else 0
     val markupColorInt = if (mkColor != Color.Unspecified) mkColor.toArgb() else 0
@@ -598,7 +728,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     val spellCheckCookies = remember { arrayOf(IntArray(0)) }
     @Suppress("UNCHECKED_CAST")
     val originalKeyListener = remember { arrayOfNulls<android.text.method.KeyListener>(1) }
-    val lastStyle = remember { arrayOf(EditorStyle(0, 0f, 0f, -1, -1, -1, true, false, "", false, false, true)) }
+    val lastStyle = remember { arrayOf(EditorStyle(0, 0, 0f, 0f, -1, -1, -1, true, false, "", false, false, false, true)) }
     val hemingwayFilter = remember {
         android.text.InputFilter { _, start, end, dest, dstart, dend ->
             if (dend - dstart > end - start) dest.subSequence(dstart, dend) else null
@@ -769,8 +899,8 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                 timerActive -> vm.timerPause()
                 else -> vm.timerResume()
             }
-            's' -> scope.launch { statsData = vm.getDailyStats(); showStats = true }
-            'a' -> if (toc.isNotEmpty()) {
+            's' -> if (BuildConfig.FULL_VERSION) scope.launch { statsData = vm.getDailyStats(); showStats = true }
+            'a' -> if (BuildConfig.FULL_VERSION && toc.isNotEmpty()) {
                 analyseData = computeSectionAnalysis(toc, content); showAnalyse = true
             }
             'm' -> showMenu = true
@@ -924,31 +1054,37 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         }
     }
 
+    val defaultTitle = stringResource(R.string.editor_default_title)
+    val readOnlySuffix = stringResource(R.string.editor_title_readonly_suffix)
     val titleText = buildString {
         if (wsDualMode) append("[$wsActive] ")
-        append(currentFile?.name ?: "Editor")
-        if (!fileWritable && !isScratchpad) append(" [read-only]") else if (dirty) append(" *")
+        append(currentFile?.name ?: defaultTitle)
+        if (!fileWritable && !isScratchpad) append(" $readOnlySuffix") else if (dirty) append(" *")
     }
     @Composable
     fun MenuItems() {
         // ⌨ Command mode (mirrors Web's top-of-menu entry: Esc / Alt+C)
         DropdownMenuItem(
-            text = { Text("Command mode", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_command_mode), fontFamily = FontFamily.Monospace) },
             onClick = { showMenu = false; cmdMode = !cmdMode },
-            trailingIcon = { Text("$keyCmdMode / Alt+C", style = MaterialTheme.typography.labelSmall,
+            trailingIcon = { Text(stringResource(R.string.editor_menu_command_mode_hint, keyCmdMode), style = MaterialTheme.typography.labelSmall,
                 color = colorScheme.onSurfaceVariant) }
+        )
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.editor_menu_settings), fontFamily = FontFamily.Monospace) },
+            onClick = { showMenu = false; onNavigateSettings() }
         )
         HorizontalDivider()
         // — Save —
         DropdownMenuItem(
-            text = { Text("Sauvegarder", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_save), fontFamily = FontFamily.Monospace) },
             enabled = dirty && fileWritable,
             onClick = { showMenu = false; vm.saveFile() },
             trailingIcon = { Text(keySave, style = MaterialTheme.typography.labelSmall,
                 color = colorScheme.onSurfaceVariant) }
         )
         DropdownMenuItem(
-            text = { Text("Sauvegarder sous…", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_save_as), fontFamily = FontFamily.Monospace) },
             enabled = currentFile != null,
             onClick = {
                 showMenu = false
@@ -960,40 +1096,40 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         HorizontalDivider()
         // — View —
         DropdownMenuItem(
-            text = { Text("Table of contents", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_toc), fontFamily = FontFamily.Monospace) },
             enabled = toc.isNotEmpty(),
             onClick = { showMenu = false; showToc = true },
             trailingIcon = { Text(keyToc, style = MaterialTheme.typography.labelSmall,
                 color = colorScheme.onSurfaceVariant) }
         )
         DropdownMenuItem(
-            text = { Text("Dark: $darkPref", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_dark, darkPref), fontFamily = FontFamily.Monospace) },
             onClick = {
                 showMenu = false
                 vm.setDarkModePreference(when (darkPref) { "auto" -> "yes"; "yes" -> "no"; else -> "auto" })
             }
         )
         DropdownMenuItem(
-            text = { Text("Line numbers", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_line_numbers), fontFamily = FontFamily.Monospace) },
             onClick = { showMenu = false; vm.setLineNumbersEnabled(!lineNumbersEnabled) },
             trailingIcon = { Text(keyLineNumbers, style = MaterialTheme.typography.labelSmall,
                 color = colorScheme.onSurfaceVariant) }
         )
         DropdownMenuItem(
-            text = { Text("Typewriter mode", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_typewriter), fontFamily = FontFamily.Monospace) },
             onClick = { showMenu = false; typewriterMode = !typewriterMode },
             trailingIcon = { Text(keyTypewriter, style = MaterialTheme.typography.labelSmall,
                 color = colorScheme.onSurfaceVariant) }
         )
         DropdownMenuItem(
-            text = { Text("Distraction-free", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_distraction_free), fontFamily = FontFamily.Monospace) },
             onClick = { showMenu = false; distractionFree = true }
         )
         // The TopAppBar (and its Save button) is hidden in distraction-free mode,
         // so offer Save here instead — only entry point for saving without leaving it.
         if (distractionFree) {
             DropdownMenuItem(
-                text = { Text("Save", fontFamily = FontFamily.Monospace) },
+                text = { Text(stringResource(R.string.editor_menu_save), fontFamily = FontFamily.Monospace) },
                 enabled = dirty && fileWritable,
                 onClick = { showMenu = false; vm.saveFile() },
                 trailingIcon = { Text(keySave, style = MaterialTheme.typography.labelSmall,
@@ -1002,8 +1138,8 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         }
         DropdownMenuItem(
             text = { Text(
-                if (wsDualMode) "Workspace $wsActive → ${if (wsActive == 1) 2 else 1}"
-                else "Open workspace 2",
+                if (wsDualMode) stringResource(R.string.editor_menu_workspace_switch, wsActive, if (wsActive == 1) 2 else 1)
+                else stringResource(R.string.editor_menu_workspace_open),
                 fontFamily = FontFamily.Monospace
             ) },
             onClick = {
@@ -1014,28 +1150,36 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         HorizontalDivider()
         // — Search —
         DropdownMenuItem(
-            text = { Text("Find", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_find), fontFamily = FontFamily.Monospace) },
             onClick = { showMenu = false; showFind = true },
             trailingIcon = { Text("⌘F", style = MaterialTheme.typography.labelSmall,
                 color = colorScheme.onSurfaceVariant) }
         )
         DropdownMenuItem(
-            text = { Text("Find & Replace", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_find_replace), fontFamily = FontFamily.Monospace) },
             onClick = { showMenu = false; showFind = true; findReplace = true },
             trailingIcon = { Text("⌘H", style = MaterialTheme.typography.labelSmall,
                 color = colorScheme.onSurfaceVariant) }
         )
         DropdownMenuItem(
-            text = { Text("Goto line…", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_goto_line), fontFamily = FontFamily.Monospace) },
             onClick = { showMenu = false; showGotoLine = true; gotoLineValue = "" },
             trailingIcon = { Text("⌘G", style = MaterialTheme.typography.labelSmall,
                 color = colorScheme.onSurfaceVariant) }
         )
         HorizontalDivider()
         // — Format — (mirrors Web's dynamic Format labels, openMenu() in app.js)
+        val h1Label = stringResource(R.string.editor_menu_h1)
+        val h2Label = stringResource(R.string.editor_menu_h2)
+        val h3Label = stringResource(R.string.editor_menu_h3)
+        val commentLabel = stringResource(R.string.editor_menu_comment)
+        val boldLabel = stringResource(R.string.editor_menu_bold)
+        val italicLabel = stringResource(R.string.editor_menu_italic)
+        val underlineLabel = stringResource(R.string.editor_menu_underline)
+        val strikeLabel = stringResource(R.string.editor_menu_strike)
         DropdownMenuItem(
             text = { Text(
-                if (headingMarker.isNotEmpty()) "$headingMarker H1 $headingMarker" else "H1",
+                if (headingMarker.isNotEmpty()) "$headingMarker $h1Label $headingMarker" else h1Label,
                 fontFamily = FontFamily.Monospace
             ) },
             enabled = headingMarker.isNotEmpty(),
@@ -1049,7 +1193,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         DropdownMenuItem(
             text = { Text(
                 if (headingMarker.isNotEmpty())
-                    "${headingMarker.repeat(2)} H2 ${headingMarker.repeat(2)}" else "H2",
+                    "${headingMarker.repeat(2)} $h2Label ${headingMarker.repeat(2)}" else h2Label,
                 fontFamily = FontFamily.Monospace
             ) },
             enabled = headingMarker.isNotEmpty(),
@@ -1063,7 +1207,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         DropdownMenuItem(
             text = { Text(
                 if (headingMarker.isNotEmpty())
-                    "${headingMarker.repeat(3)} H3 ${headingMarker.repeat(3)}" else "H3",
+                    "${headingMarker.repeat(3)} $h3Label ${headingMarker.repeat(3)}" else h3Label,
                 fontFamily = FontFamily.Monospace
             ) },
             enabled = headingMarker.isNotEmpty(),
@@ -1076,7 +1220,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         )
         DropdownMenuItem(
             text = { Text(
-                if (commentMarker.isNotEmpty()) "$commentMarker Comment" else "Comment",
+                if (commentMarker.isNotEmpty()) "$commentMarker $commentLabel" else commentLabel,
                 fontFamily = FontFamily.Monospace
             ) },
             enabled = commentMarker.isNotEmpty(),
@@ -1089,7 +1233,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         )
         DropdownMenuItem(
             text = { Text(
-                if (boldMarker.isNotEmpty()) "$boldMarker Bold" else "Bold",
+                if (boldMarker.isNotEmpty()) "$boldMarker $boldLabel" else boldLabel,
                 fontFamily = FontFamily.Monospace
             ) },
             enabled = boldMarker.isNotEmpty(),
@@ -1102,7 +1246,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         )
         DropdownMenuItem(
             text = { Text(
-                if (italicMarker.isNotEmpty()) "$italicMarker Italic" else "Italic",
+                if (italicMarker.isNotEmpty()) "$italicMarker $italicLabel" else italicLabel,
                 fontFamily = FontFamily.Monospace
             ) },
             enabled = italicMarker.isNotEmpty(),
@@ -1115,7 +1259,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         )
         DropdownMenuItem(
             text = { Text(
-                if (underlineMarker.isNotEmpty()) "$underlineMarker Underline" else "Underline",
+                if (underlineMarker.isNotEmpty()) "$underlineMarker $underlineLabel" else underlineLabel,
                 fontFamily = FontFamily.Monospace
             ) },
             enabled = underlineMarker.isNotEmpty(),
@@ -1128,7 +1272,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         )
         DropdownMenuItem(
             text = { Text(
-                if (strikethroughMarker.isNotEmpty()) "$strikethroughMarker Strike" else "Strike",
+                if (strikethroughMarker.isNotEmpty()) "$strikethroughMarker $strikeLabel" else strikeLabel,
                 fontFamily = FontFamily.Monospace
             ) },
             enabled = strikethroughMarker.isNotEmpty(),
@@ -1141,38 +1285,40 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         )
         HorizontalDivider()
         // — Document —
+        if (BuildConfig.FULL_VERSION) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.editor_menu_writing_stats), fontFamily = FontFamily.Monospace) },
+                onClick = { showMenu = false; scope.launch { statsData = vm.getDailyStats(); showStats = true } }
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.editor_menu_structure_analysis), fontFamily = FontFamily.Monospace) },
+                enabled = toc.isNotEmpty(),
+                onClick = { showMenu = false; analyseData = computeSectionAnalysis(toc, content); showAnalyse = true }
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.editor_menu_word_frequency), fontFamily = FontFamily.Monospace) },
+                onClick = { showMenu = false; scope.launch { wordsData = vm.getWordOccurrences(); showWords = true } }
+            )
+        }
         DropdownMenuItem(
-            text = { Text("Writing stats", fontFamily = FontFamily.Monospace) },
-            onClick = { showMenu = false; scope.launch { statsData = vm.getDailyStats(); showStats = true } }
-        )
-        DropdownMenuItem(
-            text = { Text("Structure analysis", fontFamily = FontFamily.Monospace) },
-            enabled = toc.isNotEmpty(),
-            onClick = { showMenu = false; analyseData = computeSectionAnalysis(toc, content); showAnalyse = true }
-        )
-        DropdownMenuItem(
-            text = { Text("Word frequency", fontFamily = FontFamily.Monospace) },
-            onClick = { showMenu = false; scope.launch { wordsData = vm.getWordOccurrences(); showWords = true } }
-        )
-        DropdownMenuItem(
-            text = { Text("File info", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_file_info), fontFamily = FontFamily.Monospace) },
             enabled = currentFile != null && !isScratchpad,
             onClick = { showMenu = false; showFileInfo = true }
         )
         DropdownMenuItem(
-            text = { Text("Export as .txt", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_export_txt), fontFamily = FontFamily.Monospace) },
             onClick = { showMenu = false; exportLauncher.launch(exportFileName("txt")) }
         )
         DropdownMenuItem(
-            text = { Text("Export as .md", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_export_md), fontFamily = FontFamily.Monospace) },
             onClick = { showMenu = false; exportLauncher.launch(exportFileName("md")) }
         )
         HorizontalDivider()
         // — App —
         val timerLabel = when {
-            !timerActive && timerLastTick == 0L -> "Start timer"
-            timerActive -> "Pause  ${formatTimer(timerRemaining, true).trim()}"
-            else -> "Resume  ${formatTimer(timerRemaining, false).trim()}"
+            !timerActive && timerLastTick == 0L -> stringResource(R.string.editor_menu_timer_start)
+            timerActive -> stringResource(R.string.editor_menu_timer_pause, formatTimer(timerRemaining, true).trim())
+            else -> stringResource(R.string.editor_menu_timer_resume, formatTimer(timerRemaining, false).trim())
         }
         DropdownMenuItem(
             text = { Text(timerLabel, fontFamily = FontFamily.Monospace,
@@ -1188,25 +1334,23 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         )
         if (timerLastTick != 0L || timerActive) {
             DropdownMenuItem(
-                text = { Text("Reset timer", fontFamily = FontFamily.Monospace) },
+                text = { Text(stringResource(R.string.editor_menu_timer_reset), fontFamily = FontFamily.Monospace) },
                 onClick = { showMenu = false; vm.timerReset() }
             )
         }
         DropdownMenuItem(
-            text = { Text("Block cursor", fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_menu_block_cursor), fontFamily = FontFamily.Monospace) },
             onClick = { showMenu = false; vm.setBlockCursor(!blockCursor) },
-            trailingIcon = { Text(if (blockCursor) "on" else "off", style = MaterialTheme.typography.labelSmall,
+            trailingIcon = { Text(
+                if (blockCursor) stringResource(R.string.editor_on) else stringResource(R.string.editor_off),
+                style = MaterialTheme.typography.labelSmall,
                 color = colorScheme.onSurfaceVariant) }
         )
-        DropdownMenuItem(
-            text = { Text("Settings", fontFamily = FontFamily.Monospace) },
-            onClick = { showMenu = false; onNavigateSettings() }
-        )
         // The menu can be taller than the screen (anchored near the top, near a
-        // long item list) — without trailing space, "Settings" lands flush against
-        // the bottom edge and the scrollable area ends right at it, making it hard
-        // to reach/tap. Empty disabled items give the scroll room to bring
-        // "Settings" clear of the edge.
+        // long item list) — without trailing space, the last item lands flush
+        // against the bottom edge and the scrollable area ends right at it,
+        // making it hard to reach/tap. Empty disabled items give the scroll
+        // room to bring it clear of the edge.
         DropdownMenuItem(text = { Text("") }, onClick = {}, enabled = false)
         DropdownMenuItem(text = { Text("") }, onClick = {}, enabled = false)
     }
@@ -1219,16 +1363,16 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                 navigationIcon = {
                     IconButton(onClick = { requestClose() }) {
                         @Suppress("DEPRECATION")
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.Filled.ArrowBack, contentDescription = stringResource(R.string.editor_cd_back))
                     }
                 },
                 actions = {
                     IconButton(onClick = { vm.saveFile() }, enabled = dirty && fileWritable) {
-                        Icon(Icons.Filled.Save, contentDescription = "Save")
+                        Icon(Icons.Filled.Save, contentDescription = stringResource(R.string.editor_cd_save))
                     }
                     Box {
                         IconButton(onClick = { showMenu = true }) {
-                            Icon(Icons.Filled.MoreVert, contentDescription = "More options")
+                            Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.editor_cd_more_options))
                         }
                         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.navigationBarsPadding()) {
                             MenuItems()
@@ -1256,15 +1400,15 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            "CMD", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,
+                            stringResource(R.string.editor_cmd_bar_label), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,
                             style = MaterialTheme.typography.bodySmall,
                             color = colorScheme.onPrimaryContainer,
                             modifier = Modifier.padding(end = 10.dp)
                         )
-                        for ((letter, label) in CMD_ACTIONS) {
+                        for (letter in CMD_ACTION_LETTERS) {
                             val enabled = (letter != 'o' && letter != 'a') || toc.isNotEmpty()
                             Text(
-                                "$letter:$label",
+                                "$letter:${stringResource(cmdActionLabelRes(letter))}",
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = colorScheme.onPrimaryContainer.copy(alpha = if (enabled) 1f else 0.4f),
@@ -1274,7 +1418,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                             )
                         }
                         Text(
-                            "($keyCmdMode=cancel)",
+                            stringResource(R.string.editor_cmd_bar_cancel_hint, keyCmdMode),
                             fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.bodySmall,
                             color = colorScheme.onPrimaryContainer,
@@ -1339,6 +1483,20 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     modifier = Modifier.fillMaxHeight().wrapContentWidth()
                 )
             }
+
+            // Long-press / right-click text context menu labels — resolved here (composable
+            // scope) since AndroidView's `update` lambda below is not a @Composable context
+            // and cannot call stringResource() itself.
+            val ctxMenuSpellOn = stringResource(R.string.editor_ctx_menu_spellcheck_on)
+            val ctxMenuSpellOff = stringResource(R.string.editor_ctx_menu_spellcheck_off)
+            val ctxMenuH1 = stringResource(R.string.editor_menu_h1)
+            val ctxMenuH2 = stringResource(R.string.editor_menu_h2)
+            val ctxMenuH3 = stringResource(R.string.editor_menu_h3)
+            val ctxMenuComment = stringResource(R.string.editor_menu_comment)
+            val ctxMenuBold = stringResource(R.string.editor_menu_bold)
+            val ctxMenuItalic = stringResource(R.string.editor_menu_italic)
+            val ctxMenuUnderline = stringResource(R.string.editor_menu_underline)
+            val ctxMenuStrike = stringResource(R.string.editor_menu_strike)
 
             AndroidView(
                 factory = { ctx ->
@@ -1405,10 +1563,10 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                         ignoreTextChange[0] = false
                     }
                     // Guard all layout-invalidating calls — avoids scroll jank from timer recompositions.
-                    val newStyle = EditorStyle(editorFgInt, fontSize.toFloat(), lineSpacing,
+                    val newStyle = EditorStyle(editorFgInt, editorBgInt, fontSize.toFloat(), lineSpacing,
                                                effMarginWidthPx, effMarginHeightPx, effMarginHeightPx + extraBottomPadPx,
                                                fileWritable || isScratchpad, hemingwayActive,
-                                               fontFamily, fontBold, blockCursor, spellCheckEnabled)
+                                               fontFamily, fontBold, blockCursor, cursorBlink, spellCheckEnabled)
                     if (lastStyle[0] != newStyle) {
                         editText.setTextColor(newStyle.fgColor)
                         if (newStyle.fontFamily != lastStyle[0].fontFamily || newStyle.fontBold != lastStyle[0].fontBold) {
@@ -1425,19 +1583,13 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                         editText.keyListener = if (newStyle.writable) originalKeyListener[0] else null
                         editText.filters = if (newStyle.hemingway && newStyle.writable)
                             arrayOf(hemingwayFilter) else emptyArray()
-                        // Block cursor: Android has no native -blockcursor like Tk; emulate it with a
-                        // custom cursor drawable sized to one character's width × the line height,
-                        // filled with the foreground colour (matches Tk's -insertbackground $fg).
-                        // setTextCursorDrawable is API 29+ — older devices keep the default thin caret.
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            editText.textCursorDrawable = if (newStyle.blockCursor) {
-                                val charWidth = editText.paint.measureText("M").toInt().coerceAtLeast(1)
-                                GradientDrawable().apply {
-                                    setColor(newStyle.fgColor)
-                                    setSize(charWidth, editText.lineHeight)
-                                }
-                            } else null
-                        }
+                        // Block cursor: Android has no native -blockcursor like Tk; FlingEditText
+                        // draws it itself in onDraw — sized to the exact glyph under the caret
+                        // (correct for proportional fonts) and inverting that glyph (text drawn in
+                        // the background colour over a foreground-filled block, like Tk's
+                        // -blockcursor + -insertbackground $fg). Works on all API levels.
+                        editText.setBlockCursor(newStyle.blockCursor, newStyle.fgColor, newStyle.bgColor)
+                        editText.setCursorBlink(newStyle.cursorBlink)
                         lastStyle[0] = newStyle
                     }
 
@@ -1445,17 +1597,17 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     // menu's Format section (markers configurable in Settings > Display).
                     contextMenuCreateRef[0] = { menu ->
                         menu.add(Menu.NONE, MENU_ID_SPELLCHECK, 100,
-                            "Spell check: ${if (spellCheckEnabled) "on" else "off"}")
+                            if (spellCheckEnabled) ctxMenuSpellOn else ctxMenuSpellOff)
                         if (headingMarker.isNotEmpty()) {
-                            menu.add(Menu.NONE, MENU_ID_H1, 101, "H1")
-                            menu.add(Menu.NONE, MENU_ID_H2, 102, "H2")
-                            menu.add(Menu.NONE, MENU_ID_H3, 103, "H3")
+                            menu.add(Menu.NONE, MENU_ID_H1, 101, ctxMenuH1)
+                            menu.add(Menu.NONE, MENU_ID_H2, 102, ctxMenuH2)
+                            menu.add(Menu.NONE, MENU_ID_H3, 103, ctxMenuH3)
                         }
-                        if (commentMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_COMMENT, 104, "Comment")
-                        if (boldMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_BOLD, 105, "Bold")
-                        if (italicMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_ITALIC, 106, "Italic")
-                        if (underlineMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_UNDERLINE, 107, "Underline")
-                        if (strikethroughMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_STRIKE, 108, "Strike")
+                        if (commentMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_COMMENT, 104, ctxMenuComment)
+                        if (boldMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_BOLD, 105, ctxMenuBold)
+                        if (italicMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_ITALIC, 106, ctxMenuItalic)
+                        if (underlineMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_UNDERLINE, 107, ctxMenuUnderline)
+                        if (strikethroughMarker.isNotEmpty()) menu.add(Menu.NONE, MENU_ID_STRIKE, 108, ctxMenuStrike)
                     }
                     contextMenuClickRef[0] = clickHandler@{ itemId ->
                         val et = editorRef.value ?: return@clickHandler false
@@ -1579,14 +1731,14 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     onClick = { distractionFree = false },
                     modifier = Modifier.align(Alignment.TopEnd).padding(4.dp)
                 ) {
-                    Icon(Icons.Filled.FullscreenExit, contentDescription = "Exit distraction-free",
+                    Icon(Icons.Filled.FullscreenExit, contentDescription = stringResource(R.string.editor_cd_exit_distraction_free),
                          tint = editorFg.copy(alpha = 0.35f))
                 }
                 // "≡" menu — also reachable here so cmd-mode `m` / Alt+M still
                 // shows the menu while the TopAppBar is hidden.
                 Box(modifier = Modifier.align(Alignment.TopEnd).padding(top = 48.dp, end = 4.dp)) {
                     IconButton(onClick = { showMenu = true }) {
-                        Icon(Icons.Filled.MoreVert, contentDescription = "Menu",
+                        Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.editor_cd_menu),
                              tint = editorFg.copy(alpha = 0.35f))
                     }
                     DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }, modifier = Modifier.navigationBarsPadding()) {
@@ -1640,20 +1792,20 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                             IconButton(onClick = {
                                 if (searchMatches.isNotEmpty())
                                     findMatchIndex = (findMatchIndex - 1 + searchMatches.size) % searchMatches.size
-                            }) { Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Previous") }
+                            }) { Icon(Icons.Filled.KeyboardArrowUp, contentDescription = stringResource(R.string.editor_cd_previous)) }
                             IconButton(onClick = {
                                 if (searchMatches.isNotEmpty())
                                     findMatchIndex = (findMatchIndex + 1) % searchMatches.size
-                            }) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Next") }
+                            }) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = stringResource(R.string.editor_cd_next)) }
                             IconButton(onClick = { findReplace = !findReplace }) {
                                 Icon(
                                     Icons.Filled.SwapVert,
-                                    contentDescription = "Toggle replace",
+                                    contentDescription = stringResource(R.string.editor_cd_toggle_replace),
                                     tint = if (findReplace) colorScheme.primary else colorScheme.onSurfaceVariant
                                 )
                             }
                             IconButton(onClick = { showFind = false; findQuery = ""; findReplace = false }) {
-                                Icon(Icons.Filled.Close, contentDescription = "Close search")
+                                Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.editor_cd_close_search))
                             }
                         }
                         // Replace row
@@ -1684,11 +1836,11 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                                 TextButton(
                                     onClick = { doReplaceOne() },
                                     enabled = searchMatches.isNotEmpty()
-                                ) { Text("Replace", style = MaterialTheme.typography.bodySmall) }
+                                ) { Text(stringResource(R.string.editor_btn_replace), style = MaterialTheme.typography.bodySmall) }
                                 TextButton(
                                     onClick = { doReplaceAll() },
                                     enabled = findQuery.length >= 2
-                                ) { Text("All", style = MaterialTheme.typography.bodySmall) }
+                                ) { Text(stringResource(R.string.editor_btn_replace_all), style = MaterialTheme.typography.bodySmall) }
                             }
                         }
                     }
@@ -1724,12 +1876,12 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         ModalBottomSheet(onDismissRequest = { showToc = false }) {
             Row(verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, bottom = 8.dp)) {
-                Text("Table of contents", style = MaterialTheme.typography.titleMedium,
+                Text(stringResource(R.string.editor_toc_title), style = MaterialTheme.typography.titleMedium,
                      modifier = Modifier.weight(1f))
                 IconButton(onClick = { tocPinned = !tocPinned }) {
                     Icon(
                         Icons.Filled.PushPin,
-                        contentDescription = if (tocPinned) "Unpin TOC" else "Pin TOC",
+                        contentDescription = if (tocPinned) stringResource(R.string.editor_cd_unpin_toc) else stringResource(R.string.editor_cd_pin_toc),
                         tint = if (tocPinned) colorScheme.primary else colorScheme.onSurfaceVariant
                     )
                 }
@@ -1774,13 +1926,13 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     }
 
 
-    if (showStats) {
+    if (BuildConfig.FULL_VERSION && showStats) {
         AlertDialog(
             onDismissRequest = { showStats = false },
-            title = { Text("Writing stats", fontFamily = FontFamily.Monospace) },
+            title = { Text(stringResource(R.string.editor_dialog_stats_title), fontFamily = FontFamily.Monospace) },
             text = {
                 if (statsData.isEmpty()) {
-                    Text("No stats yet.", fontFamily = FontFamily.Monospace,
+                    Text(stringResource(R.string.editor_dialog_stats_empty), fontFamily = FontFamily.Monospace,
                          color = colorScheme.onSurfaceVariant)
                 } else {
                     LazyColumn {
@@ -1789,7 +1941,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                                 horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text(entry.date, fontFamily = FontFamily.Monospace,
                                      style = MaterialTheme.typography.bodyMedium)
-                                Text("${entry.words} w", fontFamily = FontFamily.Monospace,
+                                Text(stringResource(R.string.editor_words_abbrev, entry.words), fontFamily = FontFamily.Monospace,
                                      style = MaterialTheme.typography.bodyMedium,
                                      color = colorScheme.primary)
                             }
@@ -1798,7 +1950,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { showStats = false }) { Text("Close") } }
+            confirmButton = { TextButton(onClick = { showStats = false }) { Text(stringResource(R.string.editor_btn_close)) } }
         )
     }
 
@@ -1824,20 +1976,20 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Path", style = MaterialTheme.typography.labelSmall,
+                    Text(stringResource(R.string.editor_dialog_file_info_path), style = MaterialTheme.typography.labelSmall,
                          color = colorScheme.primary)
                     Text(entry.path, fontFamily = FontFamily.Monospace,
                          style = MaterialTheme.typography.bodySmall)
                     HorizontalDivider()
-                    Text("Size: $sizeStr", style = MaterialTheme.typography.bodyMedium)
-                    Text("Modified: $dateStr", style = MaterialTheme.typography.bodyMedium)
-                    Text("Words: $wordCount", style = MaterialTheme.typography.bodyMedium)
-                    Text("Characters: ${content.length}", style = MaterialTheme.typography.bodyMedium)
+                    Text(stringResource(R.string.editor_dialog_file_info_size, sizeStr), style = MaterialTheme.typography.bodyMedium)
+                    Text(stringResource(R.string.editor_dialog_file_info_modified, dateStr), style = MaterialTheme.typography.bodyMedium)
+                    Text(stringResource(R.string.editor_dialog_file_info_words, wordCount), style = MaterialTheme.typography.bodyMedium)
+                    Text(stringResource(R.string.editor_dialog_file_info_characters, content.length), style = MaterialTheme.typography.bodyMedium)
                 }
             },
             confirmButton = {},
             dismissButton = {
-                TextButton(onClick = { showFileInfo = false }) { Text("Close") }
+                TextButton(onClick = { showFileInfo = false }) { Text(stringResource(R.string.editor_btn_close)) }
             }
         )
     }
@@ -1845,64 +1997,63 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
     if (timerAlertPending) {
         AlertDialog(
             onDismissRequest = { vm.dismissTimerAlert() },
-            title = { Text("Timer finished", fontFamily = FontFamily.Monospace) },
-            text = { Text("Your writing session is complete.", style = MaterialTheme.typography.bodyMedium) },
-            confirmButton = { Button(onClick = { vm.dismissTimerAlert() }) { Text("OK") } }
+            title = { Text(stringResource(R.string.editor_dialog_timer_finished_title), fontFamily = FontFamily.Monospace) },
+            text = { Text(stringResource(R.string.editor_dialog_timer_finished_text), style = MaterialTheme.typography.bodyMedium) },
+            confirmButton = { Button(onClick = { vm.dismissTimerAlert() }) { Text(stringResource(R.string.editor_btn_ok)) } }
         )
     }
 
     if (showReadOnlyAlert) {
         AlertDialog(
             onDismissRequest = { showReadOnlyAlert = false },
-            title = { Text("Read-only file", fontFamily = FontFamily.Monospace) },
+            title = { Text(stringResource(R.string.editor_dialog_readonly_title), fontFamily = FontFamily.Monospace) },
             text = {
-                Text("This file cannot be saved from WrithDeck.\n\n" +
-                     "You can view and copy the content, but changes will not be persisted.",
+                Text(stringResource(R.string.editor_dialog_readonly_text),
                      style = MaterialTheme.typography.bodyMedium)
             },
-            confirmButton = { TextButton(onClick = { showReadOnlyAlert = false }) { Text("OK") } }
+            confirmButton = { TextButton(onClick = { showReadOnlyAlert = false }) { Text(stringResource(R.string.editor_btn_ok)) } }
         )
     }
 
     if (showDiscardConfirm) {
         AlertDialog(
             onDismissRequest = { showDiscardConfirm = false },
-            title = { Text("Discard changes?") },
-            text = { Text("This file is read-only. Changes cannot be saved and will be lost.") },
+            title = { Text(stringResource(R.string.editor_dialog_discard_title)) },
+            text = { Text(stringResource(R.string.editor_dialog_discard_text)) },
             confirmButton = {
                 TextButton(
                     onClick = { showDiscardConfirm = false; doBack() },
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                ) { Text("Discard") }
+                ) { Text(stringResource(R.string.editor_btn_discard)) }
             },
-            dismissButton = { TextButton(onClick = { showDiscardConfirm = false }) { Text("Stay") } }
+            dismissButton = { TextButton(onClick = { showDiscardConfirm = false }) { Text(stringResource(R.string.editor_btn_stay)) } }
         )
     }
 
     if (showSaveConfirm) {
         AlertDialog(
             onDismissRequest = { showSaveConfirm = false },
-            title = { Text("Save changes?") },
-            text = { Text("This document has unsaved changes.") },
+            title = { Text(stringResource(R.string.editor_dialog_save_title)) },
+            text = { Text(stringResource(R.string.editor_dialog_save_text)) },
             confirmButton = {
-                TextButton(onClick = { showSaveConfirm = false; vm.saveFile(); doBack() }) { Text("Save") }
+                TextButton(onClick = { showSaveConfirm = false; vm.saveFile(); doBack() }) { Text(stringResource(R.string.editor_btn_save)) }
             },
             dismissButton = {
                 Row {
-                    TextButton(onClick = { showSaveConfirm = false; doBack() }) { Text("Don't save") }
-                    TextButton(onClick = { showSaveConfirm = false }) { Text("Cancel") }
+                    TextButton(onClick = { showSaveConfirm = false; doBack() }) { Text(stringResource(R.string.editor_btn_dont_save)) }
+                    TextButton(onClick = { showSaveConfirm = false }) { Text(stringResource(R.string.editor_btn_cancel)) }
                 }
             }
         )
     }
 
-    if (showWords) {
+    if (BuildConfig.FULL_VERSION && showWords) {
         AlertDialog(
             onDismissRequest = { showWords = false },
-            title = { Text("Word frequency", fontFamily = FontFamily.Monospace) },
+            title = { Text(stringResource(R.string.editor_dialog_word_freq_title), fontFamily = FontFamily.Monospace) },
             text = {
                 if (wordsData.isEmpty()) {
-                    Text("No words found.", fontFamily = FontFamily.Monospace,
+                    Text(stringResource(R.string.editor_dialog_word_freq_empty), fontFamily = FontFamily.Monospace,
                          color = colorScheme.onSurfaceVariant)
                 } else {
                     LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
@@ -1919,7 +2070,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { showWords = false }) { Text("Close") } }
+            confirmButton = { TextButton(onClick = { showWords = false }) { Text(stringResource(R.string.editor_btn_close)) } }
         )
     }
 
@@ -1927,12 +2078,12 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
         val lineCount = remember(content) { content.lines().size }
         AlertDialog(
             onDismissRequest = { showGotoLine = false },
-            title = { Text("Go to line", fontFamily = FontFamily.Monospace) },
+            title = { Text(stringResource(R.string.editor_dialog_goto_line_title), fontFamily = FontFamily.Monospace) },
             text = {
                 OutlinedTextField(
                     value = gotoLineValue,
                     onValueChange = { gotoLineValue = it },
-                    label = { Text("Line (1–$lineCount)") },
+                    label = { Text(stringResource(R.string.editor_dialog_goto_line_label, lineCount)) },
                     singleLine = true,
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                         keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
@@ -1946,17 +2097,17 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     val offset = content.lines().take(lineNum - 1).sumOf { it.length + 1 }
                     editorRef.value?.setSelection(offset.coerceIn(0, content.length))
                     showGotoLine = false
-                }) { Text("Go") }
+                }) { Text(stringResource(R.string.editor_btn_go)) }
             },
-            dismissButton = { TextButton(onClick = { showGotoLine = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(onClick = { showGotoLine = false }) { Text(stringResource(R.string.editor_btn_cancel)) } }
         )
     }
 
-    if (showAnalyse && analyseData.isNotEmpty()) {
+    if (BuildConfig.FULL_VERSION && showAnalyse && analyseData.isNotEmpty()) {
         val totalWords = remember(analyseData) { analyseData.sumOf { it.words } }
         AlertDialog(
             onDismissRequest = { showAnalyse = false },
-            title = { Text("Structure", fontFamily = FontFamily.Monospace) },
+            title = { Text(stringResource(R.string.editor_dialog_structure_title), fontFamily = FontFamily.Monospace) },
             text = {
                 LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
                     itemsIndexed(analyseData) { _, sec ->
@@ -1978,7 +2129,7 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                 )
                                 Text(
-                                    text = "${sec.words} w",
+                                    text = stringResource(R.string.editor_words_abbrev, sec.words),
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = colorScheme.primary,
@@ -1999,17 +2150,17 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                     item {
                         Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Total", fontFamily = FontFamily.Monospace,
+                            Text(stringResource(R.string.editor_dialog_structure_total), fontFamily = FontFamily.Monospace,
                                  style = MaterialTheme.typography.bodySmall,
                                  color = colorScheme.onSurfaceVariant)
-                            Text("$totalWords w", fontFamily = FontFamily.Monospace,
+                            Text(stringResource(R.string.editor_words_abbrev, totalWords), fontFamily = FontFamily.Monospace,
                                  style = MaterialTheme.typography.bodySmall,
                                  color = colorScheme.onSurfaceVariant)
                         }
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { showAnalyse = false }) { Text("Close") } }
+            confirmButton = { TextButton(onClick = { showAnalyse = false }) { Text(stringResource(R.string.editor_btn_close)) } }
         )
     }
 }

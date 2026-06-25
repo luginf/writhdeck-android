@@ -19,10 +19,12 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.writhdeck.app.R
 import kotlin.math.roundToInt
 
 private fun pickerParseHex(hex: String): Color {
@@ -85,10 +87,10 @@ fun ColorPickerDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            TextButton(onClick = { onConfirm("#$hexField") }) { Text("OK") }
+            TextButton(onClick = { onConfirm("#$hexField") }) { Text(stringResource(R.string.colorpicker_ok_button)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.colorpicker_cancel_button)) }
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

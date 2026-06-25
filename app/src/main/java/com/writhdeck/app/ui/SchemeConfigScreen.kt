@@ -24,15 +24,24 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.writhdeck.app.BUILTIN_SCHEMES
+import com.writhdeck.app.R
 import com.writhdeck.app.SchemeColors
 import com.writhdeck.app.WrithdeckViewModel
 
-private val COLOR_LABELS = listOf(
-    "Background", "Text", "Bar BG", "Bar FG", "Selection", "Headings", "Comments", "Markup"
+private val COLOR_LABEL_KEYS = listOf(
+    R.string.scheme_color_label_background,
+    R.string.scheme_color_label_text,
+    R.string.scheme_color_label_bar_bg,
+    R.string.scheme_color_label_bar_fg,
+    R.string.scheme_color_label_selection,
+    R.string.scheme_color_label_headings,
+    R.string.scheme_color_label_comments,
+    R.string.scheme_color_label_markup,
 )
 
 private fun SchemeColors.darkList() = listOf(bg, fg, bgBar, fgBar, bgSel, heading, comment, markup)
@@ -116,14 +125,17 @@ private fun SchemeList(
     var dupName     by remember { mutableStateOf("") }
     var dupError    by remember { mutableStateOf("") }
 
+    val nameEmptyError = stringResource(R.string.scheme_duplicate_error_empty)
+    val nameExistsErrorTemplate = stringResource(R.string.scheme_duplicate_error_exists)
+
     duplicating?.let { (origName, origColors) ->
         AlertDialog(
             onDismissRequest = { duplicating = null },
-            title = { Text("Duplicate scheme", fontFamily = FontFamily.Monospace) },
+            title = { Text(stringResource(R.string.scheme_duplicate_dialog_title), fontFamily = FontFamily.Monospace) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        "New name for copy of \"$origName\":",
+                        stringResource(R.string.scheme_duplicate_dialog_prompt, origName),
                         style = MaterialTheme.typography.bodySmall,
                     )
                     OutlinedTextField(
@@ -140,17 +152,17 @@ private fun SchemeList(
                 TextButton(onClick = {
                     val n = dupName.trim()
                     when {
-                        n.isEmpty()               -> dupError = "Name cannot be empty."
-                        allSchemes.containsKey(n) -> dupError = "\"$n\" already exists."
+                        n.isEmpty()               -> dupError = nameEmptyError
+                        allSchemes.containsKey(n) -> dupError = nameExistsErrorTemplate.format(n)
                         else -> {
                             onDuplicate(n, origColors)
                             duplicating = null
                         }
                     }
-                }) { Text("Create") }
+                }) { Text(stringResource(R.string.scheme_duplicate_create_button)) }
             },
             dismissButton = {
-                TextButton(onClick = { duplicating = null }) { Text("Cancel") }
+                TextButton(onClick = { duplicating = null }) { Text(stringResource(R.string.scheme_cancel_button)) }
             },
         )
     }
@@ -158,15 +170,15 @@ private fun SchemeList(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Color schemes", fontFamily = FontFamily.Monospace) },
+                title = { Text(stringResource(R.string.scheme_list_title), fontFamily = FontFamily.Monospace) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.scheme_back_content_description))
                     }
                 },
                 actions = {
                     IconButton(onClick = onNew) {
-                        Icon(Icons.Default.Add, contentDescription = "New scheme")
+                        Icon(Icons.Default.Add, contentDescription = stringResource(R.string.scheme_new_content_description))
                     }
                 }
             )
@@ -227,21 +239,21 @@ private fun SchemeRow(
         if (isActive) {
             Icon(
                 Icons.Default.Check,
-                contentDescription = "Active",
+                contentDescription = stringResource(R.string.scheme_active_content_description),
                 tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(20.dp),
             )
             Spacer(Modifier.width(4.dp))
         }
         IconButton(onClick = onDuplicate, modifier = Modifier.size(40.dp)) {
-            Icon(Icons.Default.ContentCopy, contentDescription = "Duplicate", modifier = Modifier.size(18.dp))
+            Icon(Icons.Default.ContentCopy, contentDescription = stringResource(R.string.scheme_duplicate_content_description), modifier = Modifier.size(18.dp))
         }
         IconButton(onClick = onEdit, modifier = Modifier.size(40.dp)) {
-            Icon(Icons.Default.Edit, contentDescription = "Edit", modifier = Modifier.size(18.dp))
+            Icon(Icons.Default.Edit, contentDescription = stringResource(R.string.scheme_edit_content_description), modifier = Modifier.size(18.dp))
         }
         if (isCustom) {
             IconButton(onClick = onDelete, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Default.Delete, contentDescription = "Delete", modifier = Modifier.size(18.dp))
+                Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.scheme_delete_content_description), modifier = Modifier.size(18.dp))
             }
         }
     }
@@ -277,13 +289,14 @@ private fun SchemeEditor(
             TopAppBar(
                 title = {
                     Text(
-                        if (originalName.isEmpty()) "New scheme" else "Edit: $originalName",
+                        if (originalName.isEmpty()) stringResource(R.string.scheme_editor_title_new)
+                        else stringResource(R.string.scheme_editor_title_edit, originalName),
                         fontFamily = FontFamily.Monospace
                     )
                 },
                 navigationIcon = {
                     IconButton(onClick = onCancel) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Cancel")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.scheme_cancel_content_description))
                     }
                 }
             )
@@ -293,7 +306,7 @@ private fun SchemeEditor(
             OutlinedTextField(
                 value = nameField,
                 onValueChange = { nameField = it },
-                label = { Text("Scheme name") },
+                label = { Text(stringResource(R.string.scheme_name_label)) },
                 singleLine = true,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -304,12 +317,12 @@ private fun SchemeEditor(
                 Tab(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    text = { Text("Dark") }
+                    text = { Text(stringResource(R.string.scheme_tab_dark)) }
                 )
                 Tab(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
-                    text = { Text("Light") }
+                    text = { Text(stringResource(R.string.scheme_tab_light)) }
                 )
             }
             Column(
@@ -318,10 +331,10 @@ private fun SchemeEditor(
                     .verticalScroll(rememberScrollState())
                     .padding(vertical = 4.dp)
             ) {
-                COLOR_LABELS.forEachIndexed { i, label ->
+                COLOR_LABEL_KEYS.forEachIndexed { i, labelKey ->
                     val value = if (selectedTab == 0) darkFields[i] else lightFields[i]
                     ColorField(
-                        label = label,
+                        label = stringResource(labelKey),
                         value = value,
                         onValueChange = { v ->
                             if (selectedTab == 0)
@@ -338,13 +351,13 @@ private fun SchemeEditor(
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
             ) {
-                OutlinedButton(onClick = onCancel) { Text("Cancel") }
+                OutlinedButton(onClick = onCancel) { Text(stringResource(R.string.scheme_cancel_button)) }
                 Button(
                     onClick = {
                         onSave(nameField.trim(), schemeFromLists(darkFields, lightFields))
                     },
                     enabled = nameField.isNotBlank()
-                ) { Text("Save") }
+                ) { Text(stringResource(R.string.scheme_save_button)) }
             }
         }
     }

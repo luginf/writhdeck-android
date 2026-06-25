@@ -3,6 +3,7 @@ package com.writhdeck.app
 import android.Manifest
 import android.app.Application
 import android.content.ContentResolver
+import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.media.RingtoneManager
@@ -16,7 +17,10 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -50,6 +54,7 @@ data class SettingsData(
     val fontFamily: String = "monospace",
     val fontBold: Boolean = false,
     val blockCursor: Boolean = false,
+    val cursorBlink: Boolean = false,
     val marginWidth: Int = 16,
     val marginHeight: Int = 16,
     val wordGoal: Int = 0,
@@ -78,10 +83,20 @@ data class SettingsData(
     val docsCustomDir: String = "",
     val spellCheckEnabled: Boolean = true,
     val spellCheckLanguage: String = "system",
-    val androidDarkMode: String = "auto"
+    val androidDarkMode: String = "auto",
+    val appLanguage: String = "system"
 )
 
 class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
+
+    companion object {
+        const val PREFS_NAME = "writhdeck_prefs"
+        const val PREF_LANGUAGE = "app_language"
+    }
+
+    private val _languageChanged = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val languageChanged: SharedFlow<Unit> = _languageChanged.asSharedFlow()
+
 
     private val externalDocsDir = File(
         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "writhdeck"
@@ -207,11 +222,17 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
     private val _blockCursor = MutableStateFlow(false)
     val blockCursor = _blockCursor.asStateFlow()
 
+    private val _cursorBlink = MutableStateFlow(false)
+    val cursorBlink = _cursorBlink.asStateFlow()
+
     private val _spellCheckEnabled = MutableStateFlow(true)
     val spellCheckEnabled = _spellCheckEnabled.asStateFlow()
 
     private val _spellCheckLanguage = MutableStateFlow("system")
     val spellCheckLanguage = _spellCheckLanguage.asStateFlow()
+
+    private val _appLanguage = MutableStateFlow("system")
+    val appLanguage = _appLanguage.asStateFlow()
 
     private val _timerType = MutableStateFlow("countdown")
     val timerType = _timerType.asStateFlow()
@@ -366,8 +387,12 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         _fontFamily.value = config.fontFamily
         _fontBold.value = config.fontBold
         _blockCursor.value = config.blockCursor
+        _cursorBlink.value = config.cursorBlink
         _spellCheckEnabled.value = config.spellCheckEnabled
         _spellCheckLanguage.value = config.spellCheckLanguage
+        _appLanguage.value = config.appLanguage
+        getApplication<Application>().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString(PREF_LANGUAGE, config.appLanguage).apply()
         _darkModePreference.value = config.androidDarkMode
         _customSchemes.value = config.customSchemes
         _activeScheme.value = config.scheme
@@ -1147,6 +1172,7 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         fontFamily       = config.fontFamily,
         fontBold         = config.fontBold,
         blockCursor      = config.blockCursor,
+        cursorBlink      = config.cursorBlink,
         marginWidth      = config.marginWidth,
         marginHeight     = config.marginHeight,
         wordGoal         = config.wordGoal,
@@ -1175,16 +1201,19 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
         docsCustomDir    = config.docsCustomDir,
         spellCheckEnabled = config.spellCheckEnabled,
         spellCheckLanguage = config.spellCheckLanguage,
-        androidDarkMode   = config.androidDarkMode
+        androidDarkMode   = config.androidDarkMode,
+        appLanguage       = config.appLanguage
     )
 
     fun applySettings(s: SettingsData) {
+        val prevLanguage = config.appLanguage
         config = config.copy(
             scheme           = s.scheme,
             fontSize         = s.fontSize,
             fontFamily       = s.fontFamily,
             fontBold         = s.fontBold,
             blockCursor      = s.blockCursor,
+            cursorBlink      = s.cursorBlink,
             marginWidth      = s.marginWidth,
             marginHeight     = s.marginHeight,
             wordGoal         = s.wordGoal,
@@ -1213,9 +1242,11 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
             docsCustomDir    = s.docsCustomDir,
             spellCheckEnabled  = s.spellCheckEnabled,
             spellCheckLanguage = s.spellCheckLanguage,
-            androidDarkMode    = s.androidDarkMode
+            androidDarkMode    = s.androidDarkMode,
+            appLanguage        = s.appLanguage
         )
         applyConfig()
+        if (prevLanguage != s.appLanguage) _languageChanged.tryEmit(Unit)
         _browserDir.value = null   // docs folder / subdir setting may have changed
         refreshDocs()
         val activeProfile = config.activeProfile
@@ -1245,7 +1276,9 @@ class WrithdeckViewModel(app: Application) : AndroidViewModel(app) {
                 "browser_subdirs"   to b(s.browserSubdirs),
                 "docs_dir"          to s.docsCustomDir,
                 "spell_check"       to b(s.spellCheckEnabled),
-                "spell_check_language" to s.spellCheckLanguage
+                "spell_check_language" to s.spellCheckLanguage,
+                "app_language"      to s.appLanguage,
+                "cursor_blink"      to b(s.cursorBlink)
             )
             // Profile-scoped keys (defined per `[profiles] -> [<name>]` sub-section, see
             // IniParser.write()'s default/novel template) — patched only within the

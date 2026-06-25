@@ -1,7 +1,9 @@
 package com.writhdeck.app
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -22,6 +24,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
 import com.writhdeck.app.ui.AppNavigation
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
@@ -31,6 +34,19 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) vm.onStoragePermissionGranted()
+    }
+
+    override fun attachBaseContext(newBase: Context) {
+        val lang = newBase
+            .getSharedPreferences(WrithdeckViewModel.PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(WrithdeckViewModel.PREF_LANGUAGE, "system") ?: "system"
+        val ctx = if (lang != "system") {
+            val locale = Locale.forLanguageTag(lang)
+            val config = Configuration(newBase.resources.configuration)
+            config.setLocale(locale)
+            newBase.createConfigurationContext(config)
+        } else newBase
+        super.attachBaseContext(ctx)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -52,6 +68,9 @@ class MainActivity : ComponentActivity() {
             val themeColors by vm.themeColors.collectAsState()
             MaterialTheme(colorScheme = writhdeckColorScheme(themeColors, useDark)) {
                 AppNavigation(vm = vm, onRequestPermission = ::requestStoragePermission)
+            }
+            LaunchedEffect(Unit) {
+                vm.languageChanged.collect { recreate() }
             }
         }
     }

@@ -30,6 +30,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -45,11 +46,20 @@ import com.writhdeck.app.BUILTIN_SCHEMES
 import com.writhdeck.app.EDITOR_FONTS
 import com.writhdeck.app.EditorFont
 import com.writhdeck.app.FontManager
+import com.writhdeck.app.R
 import com.writhdeck.app.SettingsData
 import com.writhdeck.app.WrithdeckViewModel
 
 // Tab order mirrors the Tcl/Tk desktop config dialog: Profile, Display, Fonts, Schemes, Timer, Misc
-private val SETTINGS_TABS = listOf("Profile", "Display", "Fonts", "Schemes", "Timer", "Misc")
+@Composable
+private fun settingsTabs(): List<String> = listOf(
+    stringResource(R.string.settings_tab_profile),
+    stringResource(R.string.settings_tab_display),
+    stringResource(R.string.settings_tab_fonts),
+    stringResource(R.string.settings_tab_schemes),
+    stringResource(R.string.settings_tab_timer),
+    stringResource(R.string.settings_tab_misc)
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -77,15 +87,15 @@ fun SettingsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Settings", fontFamily = FontFamily.Monospace) },
+                title = { Text(stringResource(R.string.settings_title), fontFamily = FontFamily.Monospace) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.settings_back))
                     }
                 },
                 actions = {
                     TextButton(onClick = { vm.applySettings(s); onBack() }) {
-                        Text("Save")
+                        Text(stringResource(R.string.settings_save))
                     }
                 }
             )
@@ -98,8 +108,9 @@ fun SettingsScreen(
             with(density) { padding.calculateBottomPadding().roundToPx() }).coerceAtLeast(0)
         val extraBottomPad = with(density) { extraBottomPadPx.toDp() }
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            val tabLabels = settingsTabs()
             ScrollableTabRow(selectedTabIndex = selectedTab, edgePadding = 8.dp) {
-                SETTINGS_TABS.forEachIndexed { i, label ->
+                tabLabels.forEachIndexed { i, label ->
                     Tab(
                         selected = selectedTab == i,
                         onClick = { selectedTab = i },
@@ -148,8 +159,8 @@ private fun ProfileTab(
     var nameError         by remember { mutableStateOf("") }
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
-    SettingsSection("Active profile")
-    DropdownSettingRow("Profile", activeProfile, profileNames, onChange = onSwitchProfile)
+    SettingsSection(stringResource(R.string.settings_profile_active_profile))
+    DropdownSettingRow(stringResource(R.string.settings_profile_profile), activeProfile, profileNames, onChange = onSwitchProfile)
 
     Row(
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -158,7 +169,7 @@ private fun ProfileTab(
         OutlinedButton(onClick = { newProfileName = ""; nameError = ""; showNewDialog = true }) {
             Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(4.dp))
-            Text("New profile", fontFamily = FontFamily.Monospace)
+            Text(stringResource(R.string.settings_profile_new_profile), fontFamily = FontFamily.Monospace)
         }
         OutlinedButton(
             onClick = { showDeleteConfirm = true },
@@ -175,17 +186,20 @@ private fun ProfileTab(
         ) {
             Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(4.dp))
-            Text("Delete", fontFamily = FontFamily.Monospace)
+            Text(stringResource(R.string.settings_profile_delete), fontFamily = FontFamily.Monospace)
         }
     }
 
     if (showNewDialog) {
+        val emptyNameError = stringResource(R.string.settings_profile_error_empty_name)
+        val invalidNameError = stringResource(R.string.settings_profile_error_invalid_name)
+        val alreadyExistsError = stringResource(R.string.settings_profile_error_already_exists)
         AlertDialog(
             onDismissRequest = { showNewDialog = false },
-            title = { Text("New profile", fontFamily = FontFamily.Monospace) },
+            title = { Text(stringResource(R.string.settings_profile_new_profile), fontFamily = FontFamily.Monospace) },
             text = {
                 Column {
-                    Text("Enter a name (letters, digits, _ only).",
+                    Text(stringResource(R.string.settings_profile_new_profile_hint),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
                     Spacer(Modifier.height(8.dp))
@@ -203,15 +217,15 @@ private fun ProfileTab(
                 TextButton(onClick = {
                     val n = newProfileName.trim()
                     when {
-                        n.isEmpty()                    -> nameError = "Name cannot be empty."
-                        !PROFILE_NAME_RE.matches(n)    -> nameError = "Letters, digits and _ only."
-                        profileNames.contains(n)       -> nameError = "Profile \"$n\" already exists."
+                        n.isEmpty()                    -> nameError = emptyNameError
+                        !PROFILE_NAME_RE.matches(n)    -> nameError = invalidNameError
+                        profileNames.contains(n)       -> nameError = String.format(alreadyExistsError, n)
                         else -> { onNewProfile(n); showNewDialog = false }
                     }
-                }) { Text("Create") }
+                }) { Text(stringResource(R.string.settings_profile_create)) }
             },
             dismissButton = {
-                TextButton(onClick = { showNewDialog = false }) { Text("Cancel") }
+                TextButton(onClick = { showNewDialog = false }) { Text(stringResource(R.string.settings_profile_cancel)) }
             }
         )
     }
@@ -219,63 +233,66 @@ private fun ProfileTab(
     if (showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
-            title = { Text("Delete profile", fontFamily = FontFamily.Monospace) },
-            text = { Text("Delete profile \"$activeProfile\"? This cannot be undone.") },
+            title = { Text(stringResource(R.string.settings_profile_delete_profile_title), fontFamily = FontFamily.Monospace) },
+            text = { Text(String.format(stringResource(R.string.settings_profile_delete_profile_confirm), activeProfile)) },
             confirmButton = {
                 TextButton(
                     onClick = { onDeleteProfile(); showDeleteConfirm = false },
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                ) { Text("Delete") }
+                ) { Text(stringResource(R.string.settings_profile_delete)) }
             },
             dismissButton = {
-                TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
+                TextButton(onClick = { showDeleteConfirm = false }) { Text(stringResource(R.string.settings_profile_cancel)) }
             }
         )
     }
 
-    SettingsSection("Profile settings")
-    DropdownSettingRow("Dark mode", s.androidDarkMode, listOf("auto", "yes", "no")) {
+    SettingsSection(stringResource(R.string.settings_profile_settings_section))
+    DropdownSettingRow(stringResource(R.string.settings_profile_dark_mode), s.androidDarkMode, listOf("auto", "yes", "no")) {
         onChange(s.copy(androidDarkMode = it))
     }
-    IntSettingRow("Margin width", s.marginWidth, 0, 200) { onChange(s.copy(marginWidth = it)) }
-    IntSettingRow("Margin height", s.marginHeight, 0, 200) { onChange(s.copy(marginHeight = it)) }
-    IntSettingRow("Word goal", s.wordGoal, 0, 99999) { onChange(s.copy(wordGoal = it)) }
-    FloatSettingRow("Line spacing", s.lineSpacing, 0.8f, 3.0f, 0.1f) { onChange(s.copy(lineSpacing = it)) }
+    IntSettingRow(stringResource(R.string.settings_profile_margin_width), s.marginWidth, 0, 200) { onChange(s.copy(marginWidth = it)) }
+    IntSettingRow(stringResource(R.string.settings_profile_margin_height), s.marginHeight, 0, 200) { onChange(s.copy(marginHeight = it)) }
+    IntSettingRow(stringResource(R.string.settings_profile_word_goal), s.wordGoal, 0, 99999) { onChange(s.copy(wordGoal = it)) }
+    FloatSettingRow(stringResource(R.string.settings_profile_line_spacing), s.lineSpacing, 0.8f, 3.0f, 0.1f) { onChange(s.copy(lineSpacing = it)) }
 }
 
 @Composable
 private fun DisplayTab(s: SettingsData, onChange: (SettingsData) -> Unit) {
-    SettingsSection("Status bar")
-    StringSettingRow("Left", s.statusLeft) { onChange(s.copy(statusLeft = it)) }
-    StringSettingRow("Center", s.statusCenter) { onChange(s.copy(statusCenter = it)) }
-    StringSettingRow("Right", s.statusRight) { onChange(s.copy(statusRight = it)) }
+    SettingsSection(stringResource(R.string.settings_display_status_bar))
+    StringSettingRow(stringResource(R.string.settings_display_left), s.statusLeft) { onChange(s.copy(statusLeft = it)) }
+    StringSettingRow(stringResource(R.string.settings_display_center), s.statusCenter) { onChange(s.copy(statusCenter = it)) }
+    StringSettingRow(stringResource(R.string.settings_display_right), s.statusRight) { onChange(s.copy(statusRight = it)) }
 
-    SettingsSection("Editor")
-    StringSettingRow("Heading marker", s.headingMarker) { onChange(s.copy(headingMarker = it)) }
-    SwitchSettingRow("Markdown headings (#)", s.markdownHeadings) { onChange(s.copy(markdownHeadings = it)) }
-    SwitchSettingRow("Block cursor", s.blockCursor) { onChange(s.copy(blockCursor = it)) }
-    SwitchSettingRow("Spell check", s.spellCheckEnabled) { onChange(s.copy(spellCheckEnabled = it)) }
-    DropdownSettingRow("Spell check language", s.spellCheckLanguage, spellCheckLanguageOptions()) {
+    SettingsSection(stringResource(R.string.settings_display_editor))
+    StringSettingRow(stringResource(R.string.settings_display_heading_marker), s.headingMarker) { onChange(s.copy(headingMarker = it)) }
+    SwitchSettingRow(stringResource(R.string.settings_display_markdown_headings), s.markdownHeadings) { onChange(s.copy(markdownHeadings = it)) }
+    SwitchSettingRow(stringResource(R.string.settings_display_block_cursor), s.blockCursor) { onChange(s.copy(blockCursor = it)) }
+    SwitchSettingRow(stringResource(R.string.settings_display_blinking_cursor), s.cursorBlink) { onChange(s.copy(cursorBlink = it)) }
+    SwitchSettingRow(stringResource(R.string.settings_display_spell_check), s.spellCheckEnabled) { onChange(s.copy(spellCheckEnabled = it)) }
+    DropdownSettingRow(stringResource(R.string.settings_display_spell_check_language), s.spellCheckLanguage, spellCheckLanguageOptions()) {
         onChange(s.copy(spellCheckLanguage = it))
     }
 
-    SettingsSection("Markup")
-    StringSettingRow("Comment marker", s.commentMarker) { onChange(s.copy(commentMarker = it)) }
-    StringSettingRow("Bold marker", s.boldMarker) { onChange(s.copy(boldMarker = it)) }
-    StringSettingRow("Italic marker", s.italicMarker) { onChange(s.copy(italicMarker = it)) }
-    StringSettingRow("Underline marker", s.underlineMarker) { onChange(s.copy(underlineMarker = it)) }
-    StringSettingRow("Strikethrough marker", s.strikethroughMarker) { onChange(s.copy(strikethroughMarker = it)) }
+    SettingsSection(stringResource(R.string.settings_display_markup))
+    StringSettingRow(stringResource(R.string.settings_display_comment_marker), s.commentMarker) { onChange(s.copy(commentMarker = it)) }
+    StringSettingRow(stringResource(R.string.settings_display_bold_marker), s.boldMarker) { onChange(s.copy(boldMarker = it)) }
+    StringSettingRow(stringResource(R.string.settings_display_italic_marker), s.italicMarker) { onChange(s.copy(italicMarker = it)) }
+    StringSettingRow(stringResource(R.string.settings_display_underline_marker), s.underlineMarker) { onChange(s.copy(underlineMarker = it)) }
+    StringSettingRow(stringResource(R.string.settings_display_strikethrough_marker), s.strikethroughMarker) { onChange(s.copy(strikethroughMarker = it)) }
 }
 
 @Composable
 private fun FontsTab(s: SettingsData, fonts: List<EditorFont>, fontDirs: List<File>, onChange: (SettingsData) -> Unit) {
-    IntSettingRow("Font size", s.fontSize, 10, 32) { onChange(s.copy(fontSize = it)) }
+    IntSettingRow(stringResource(R.string.settings_fonts_font_size), s.fontSize, 10, 32) { onChange(s.copy(fontSize = it)) }
     FontFamilySettingRow(s.fontFamily, fonts, fontDirs) { onChange(s.copy(fontFamily = it)) }
-    SwitchSettingRow("Bold", s.fontBold) { onChange(s.copy(fontBold = it)) }
+    SwitchSettingRow(stringResource(R.string.settings_fonts_bold), s.fontBold) { onChange(s.copy(fontBold = it)) }
     FontPreview(s.fontFamily, s.fontSize, s.fontBold, fontDirs)
     Text(
-        text = "Custom fonts: drop .ttf/.otf files in\n" +
-            fontDirs.joinToString("\n") { it.absolutePath },
+        text = String.format(
+            stringResource(R.string.settings_fonts_custom_fonts_hint),
+            fontDirs.joinToString("\n") { it.absolutePath }
+        ),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
@@ -287,7 +304,7 @@ private fun FontsTab(s: SettingsData, fonts: List<EditorFont>, fontDirs: List<Fi
 private fun FontPreview(familyName: String, fontSizeSp: Int, bold: Boolean, fontDirs: List<File>) {
     val style = if (bold) Typeface.BOLD else Typeface.NORMAL
     Text(
-        text = "The quick brown fox jumps over the lazy dog — 0123456789",
+        text = stringResource(R.string.settings_fonts_preview_text),
         fontFamily = remember(familyName, style) { FontFamily(FontManager.resolveTypeface(fontDirs, familyName, style)) },
         fontSize = fontSizeSp.sp,
         fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
@@ -339,7 +356,7 @@ private fun FontFamilySettingRow(selected: String, fonts: List<EditorFont>, font
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            text = "Font family",
+            text = stringResource(R.string.settings_fonts_font_family),
             modifier = Modifier.weight(1f),
             style = MaterialTheme.typography.bodyMedium
         )
@@ -395,7 +412,7 @@ private fun SchemesTab(
     }
 
     DropdownSettingRow(
-        label = "Scheme",
+        label = stringResource(R.string.settings_schemes_scheme),
         selected = s.scheme,
         options = remember { vm.getAllSchemeNames() }
     ) { onChange(s.copy(scheme = it)) }
@@ -405,12 +422,12 @@ private fun SchemesTab(
         horizontalArrangement = Arrangement.spacedBy(3.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text("Dark", style = MaterialTheme.typography.labelSmall,
+        Text(stringResource(R.string.settings_schemes_dark), style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
         Spacer(Modifier.width(4.dp))
         listOf(colors.bg, colors.heading, colors.comment, colors.markup).forEach { SchemePreviewSwatch(it) }
         Spacer(Modifier.width(10.dp))
-        Text("Light", style = MaterialTheme.typography.labelSmall,
+        Text(stringResource(R.string.settings_schemes_light), style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
         Spacer(Modifier.width(4.dp))
         listOf(colors.bgAlt, colors.headingAlt, colors.commentAlt, colors.markupAlt).forEach { SchemePreviewSwatch(it) }
@@ -420,7 +437,7 @@ private fun SchemesTab(
         onClick = onNavigateSchemes,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
     ) {
-        Text("Edit scheme colors", fontFamily = FontFamily.Monospace)
+        Text(stringResource(R.string.settings_schemes_edit_scheme_colors), fontFamily = FontFamily.Monospace)
     }
 }
 
@@ -437,14 +454,14 @@ private fun SchemePreviewSwatch(hex: String) {
 @Composable
 private fun TimerTab(s: SettingsData, onChange: (SettingsData) -> Unit) {
     DropdownSettingRow(
-        label = "Type",
+        label = stringResource(R.string.settings_timer_type),
         selected = s.timerType,
         options = listOf("countdown", "stopwatch")
     ) { onChange(s.copy(timerType = it)) }
-    IntSettingRow("Duration (min)", s.timerDuration, 1, 240) { onChange(s.copy(timerDuration = it)) }
-    SwitchSettingRow("Sound at end", s.timerSound) { onChange(s.copy(timerSound = it)) }
-    SwitchSettingRow("Alert dialog", s.timerAlert) { onChange(s.copy(timerAlert = it)) }
-    SwitchSettingRow("Show in status bar", s.chronoShow) { onChange(s.copy(chronoShow = it)) }
+    IntSettingRow(stringResource(R.string.settings_timer_duration), s.timerDuration, 1, 240) { onChange(s.copy(timerDuration = it)) }
+    SwitchSettingRow(stringResource(R.string.settings_timer_sound_at_end), s.timerSound) { onChange(s.copy(timerSound = it)) }
+    SwitchSettingRow(stringResource(R.string.settings_timer_alert_dialog), s.timerAlert) { onChange(s.copy(timerAlert = it)) }
+    SwitchSettingRow(stringResource(R.string.settings_timer_show_in_status_bar), s.chronoShow) { onChange(s.copy(chronoShow = it)) }
 }
 
 @Composable
@@ -452,10 +469,15 @@ private fun MiscTab(s: SettingsData, vm: WrithdeckViewModel, onEditIni: () -> Un
     val storagePermissionGranted by vm.storagePermissionGranted.collectAsStateWithLifecycle()
     var showFolderPicker by remember { mutableStateOf(false) }
 
-    SwitchSettingRow("Hemingway mode", s.hemingwayMode) { onChange(s.copy(hemingwayMode = it)) }
+    SwitchSettingRow(stringResource(R.string.settings_misc_hemingway_mode), s.hemingwayMode) { onChange(s.copy(hemingwayMode = it)) }
 
-    SettingsSection("Documents folder")
-    StringSettingRow("Custom folder", s.docsCustomDir, enabled = storagePermissionGranted) {
+    SettingsSection(stringResource(R.string.settings_misc_language_section))
+    DropdownSettingRow(stringResource(R.string.settings_misc_app_language), s.appLanguage, listOf("system", "en", "fr", "es", "de", "pt-BR")) {
+        onChange(s.copy(appLanguage = it))
+    }
+
+    SettingsSection(stringResource(R.string.settings_misc_documents_folder))
+    StringSettingRow(stringResource(R.string.settings_misc_custom_folder), s.docsCustomDir, enabled = storagePermissionGranted) {
         onChange(s.copy(docsCustomDir = it))
     }
     OutlinedButton(
@@ -463,25 +485,25 @@ private fun MiscTab(s: SettingsData, vm: WrithdeckViewModel, onEditIni: () -> Un
         enabled = storagePermissionGranted,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
     ) {
-        Text("Browse…", fontFamily = FontFamily.Monospace)
+        Text(stringResource(R.string.settings_misc_browse), fontFamily = FontFamily.Monospace)
     }
     if (!storagePermissionGranted) {
         Text(
-            "Requires storage permission",
+            stringResource(R.string.settings_misc_requires_storage_permission),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
         )
     }
 
-    SettingsSection("Browser")
-    StringSettingRow("File filter", s.browserFilter) { onChange(s.copy(browserFilter = it)) }
-    SwitchSettingRow("Show all files (ignore filter)", s.browserShowAll) { onChange(s.copy(browserShowAll = it)) }
-    SwitchSettingRow("Browse subfolders", s.browserSubdirs) { onChange(s.copy(browserSubdirs = it)) }
+    SettingsSection(stringResource(R.string.settings_misc_browser_section))
+    StringSettingRow(stringResource(R.string.settings_misc_file_filter), s.browserFilter) { onChange(s.copy(browserFilter = it)) }
+    SwitchSettingRow(stringResource(R.string.settings_misc_show_all_files), s.browserShowAll) { onChange(s.copy(browserShowAll = it)) }
+    SwitchSettingRow(stringResource(R.string.settings_misc_browse_subfolders), s.browserSubdirs) { onChange(s.copy(browserSubdirs = it)) }
 
-    SettingsSection("Autosave")
-    SwitchSettingRow("Enabled", s.autosaveEnabled) { onChange(s.copy(autosaveEnabled = it)) }
-    IntSettingRow("Interval (min)", s.autosaveInterval, 1, 60,
+    SettingsSection(stringResource(R.string.settings_misc_autosave_section))
+    SwitchSettingRow(stringResource(R.string.settings_misc_enabled), s.autosaveEnabled) { onChange(s.copy(autosaveEnabled = it)) }
+    IntSettingRow(stringResource(R.string.settings_misc_interval_min), s.autosaveInterval, 1, 60,
         enabled = s.autosaveEnabled) { onChange(s.copy(autosaveInterval = it)) }
 
     Spacer(Modifier.height(16.dp))
@@ -489,7 +511,7 @@ private fun MiscTab(s: SettingsData, vm: WrithdeckViewModel, onEditIni: () -> Un
         onClick = onEditIni,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
     ) {
-        Text("Edit INI directly", fontFamily = FontFamily.Monospace)
+        Text(stringResource(R.string.settings_misc_edit_ini_directly), fontFamily = FontFamily.Monospace)
     }
 
     if (showFolderPicker) {
@@ -561,12 +583,12 @@ fun FolderPickerDialog(
         },
         confirmButton = {
             TextButton(onClick = { onSelect(current.absolutePath) }) {
-                Text("Use this folder")
+                Text(stringResource(R.string.settings_misc_use_this_folder))
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("Cancel")
+                Text(stringResource(R.string.settings_misc_cancel))
             }
         }
     )

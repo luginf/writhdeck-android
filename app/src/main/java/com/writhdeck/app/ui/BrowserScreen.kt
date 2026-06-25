@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
@@ -45,6 +46,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.writhdeck.app.DocEntry
+import com.writhdeck.app.R
 import com.writhdeck.app.WrithdeckViewModel
 import kotlinx.coroutines.launch
 import java.io.File
@@ -226,12 +228,12 @@ fun BrowserScreen(
                         onClick = { showFolderPicker = true },
                         enabled = storageGranted
                     ) {
-                        Icon(Icons.Filled.FolderOpen, contentDescription = "Select folder")
+                        Icon(Icons.Filled.FolderOpen, contentDescription = stringResource(R.string.browser_action_select_folder))
                     }
                     // Select file: open an individual file — mirrors the web
                     // version's `o` shortcut / openFromDisk().
                     IconButton(onClick = { openFileLauncher.launch(arrayOf("*/*")) }) {
-                        Icon(Icons.Filled.FileOpen, contentDescription = "Select file")
+                        Icon(Icons.Filled.FileOpen, contentDescription = stringResource(R.string.browser_action_select_file))
                     }
                     // Virtual keyboard toggle
                     IconButton(onClick = {
@@ -244,17 +246,17 @@ fun BrowserScreen(
                             keyboardController?.show()
                         }
                     }) {
-                        Icon(Icons.Default.Keyboard, contentDescription = "Keyboard shortcuts")
+                        Icon(Icons.Default.Keyboard, contentDescription = stringResource(R.string.browser_action_keyboard_shortcuts))
                     }
                     IconButton(onClick = onNavigateSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                        Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.browser_action_settings))
                     }
                 }
             )
         },
         floatingActionButton = {
             FloatingActionButton(onClick = { showNewDialog = true }) {
-                Icon(Icons.Default.Add, contentDescription = "New")
+                Icon(Icons.Default.Add, contentDescription = stringResource(R.string.browser_action_new))
             }
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
@@ -279,7 +281,7 @@ fun BrowserScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "scratchpad",
+                                text = stringResource(R.string.browser_scratchpad_label),
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -311,13 +313,13 @@ fun BrowserScreen(
                                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
                                 ) {
                                     Text(
-                                        "Storage access",
+                                        stringResource(R.string.browser_permission_title),
                                         style = MaterialTheme.typography.titleSmall,
                                         color = MaterialTheme.colorScheme.onSecondaryContainer
                                     )
                                     Spacer(Modifier.height(4.dp))
                                     Text(
-                                        "Without permission: files are stored in private internal storage (not visible in file manager).",
+                                        stringResource(R.string.browser_permission_private_message),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSecondaryContainer
                                     )
@@ -327,15 +329,15 @@ fun BrowserScreen(
                                         horizontalArrangement = Arrangement.End
                                     ) {
                                         TextButton(onClick = { permissionBannerDismissed = true }) {
-                                            Text("Keep private")
+                                            Text(stringResource(R.string.browser_permission_keep_private))
                                         }
                                         Spacer(Modifier.width(8.dp))
                                         Button(onClick = onRequestPermission) {
-                                            Text("Grant access")
+                                            Text(stringResource(R.string.browser_permission_grant_access))
                                         }
                                     }
                                     Text(
-                                        "Grant access: stores files in Documents/WrithDeck/ and allows opening/saving files anywhere on the device.",
+                                        stringResource(R.string.browser_permission_grant_message),
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
                                     )
@@ -368,7 +370,7 @@ fun BrowserScreen(
                     } else {
                         // Favorites section
                         if (favoriteDocs.isNotEmpty()) {
-                            item { SectionHeader("Favorites") }
+                            item { SectionHeader(stringResource(R.string.browser_section_favorites)) }
                             items(favoriteDocs, key = { "fav_${it.path}" }) { entry ->
                                 DocListItem(
                                     entry = entry,
@@ -383,14 +385,14 @@ fun BrowserScreen(
 
                         // Folders section (subfolders of the documents folder)
                         if (subdirs.isNotEmpty()) {
-                            item { SectionHeader("Folders") }
+                            item { SectionHeader(stringResource(R.string.browser_section_folders)) }
                             items(subdirs, key = { "dir_${it.path}" }) { d ->
                                 FolderNavItem(label = "${d.name}/", onClick = { selectedEntry = null; vm.enterDir(d.path) })
                             }
                         }
 
                         // Documents section
-                        item { SectionHeader("Documents") }
+                        item { SectionHeader(stringResource(R.string.browser_section_documents)) }
                         if (docs.isEmpty()) {
                             item { EmptyDocsRow() }
                         } else {
@@ -408,7 +410,7 @@ fun BrowserScreen(
 
                         // Recent section
                         if (recentOnly.isNotEmpty()) {
-                            item { SectionHeader("Recent") }
+                            item { SectionHeader(stringResource(R.string.browser_section_recent)) }
                             items(recentOnly, key = { "recent_${it.path}" }) { entry ->
                                 DocListItem(
                                     entry = entry,
@@ -486,14 +488,14 @@ fun BrowserScreen(
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Rename", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Start)
+                        Text(stringResource(R.string.browser_ctx_rename), modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Start)
                     }
                     TextButton(
                         onClick = { showContextMenu = false; showDeleteConfirm = true },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            "Delete",
+                            stringResource(R.string.browser_ctx_delete),
                             modifier = Modifier.fillMaxWidth(),
                             textAlign = TextAlign.Start,
                             color = MaterialTheme.colorScheme.error
@@ -503,14 +505,14 @@ fun BrowserScreen(
                         onClick = { vm.backupFile(entry); showContextMenu = false },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Backup", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Start)
+                        Text(stringResource(R.string.browser_ctx_backup), modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Start)
                     }
                     TextButton(
                         onClick = { vm.toggleFavorite(entry); showContextMenu = false },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            if (isFav) "Remove from favorites" else "Add to favorites",
+                            if (isFav) stringResource(R.string.browser_ctx_remove_favorite) else stringResource(R.string.browser_ctx_add_favorite),
                             modifier = Modifier.fillMaxWidth(),
                             textAlign = TextAlign.Start
                         )
@@ -519,13 +521,13 @@ fun BrowserScreen(
                         onClick = { showContextMenu = false; showInfoDialog = true },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Info", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Start)
+                        Text(stringResource(R.string.browser_ctx_info), modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Start)
                     }
                 }
             },
             confirmButton = {},
             dismissButton = {
-                TextButton(onClick = { showContextMenu = false }) { Text("Cancel") }
+                TextButton(onClick = { showContextMenu = false }) { Text(stringResource(R.string.browser_dialog_cancel)) }
             }
         )
     }
@@ -553,18 +555,18 @@ fun BrowserScreen(
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Path", style = MaterialTheme.typography.labelSmall,
+                    Text(stringResource(R.string.browser_info_path), style = MaterialTheme.typography.labelSmall,
                          color = MaterialTheme.colorScheme.primary)
                     Text(entry.path, fontFamily = FontFamily.Monospace,
                          style = MaterialTheme.typography.bodySmall)
                     HorizontalDivider()
-                    Text("Size: $sizeStr", style = MaterialTheme.typography.bodyMedium)
-                    Text("Modified: $dateStr", style = MaterialTheme.typography.bodyMedium)
+                    Text(stringResource(R.string.browser_info_size, sizeStr), style = MaterialTheme.typography.bodyMedium)
+                    Text(stringResource(R.string.browser_info_modified, dateStr), style = MaterialTheme.typography.bodyMedium)
                 }
             },
             confirmButton = {},
             dismissButton = {
-                TextButton(onClick = { showInfoDialog = false }) { Text("Close") }
+                TextButton(onClick = { showInfoDialog = false }) { Text(stringResource(R.string.browser_dialog_close)) }
             }
         )
     }
@@ -573,12 +575,12 @@ fun BrowserScreen(
     if (showRenameDialog && contextEntry != null) {
         AlertDialog(
             onDismissRequest = { showRenameDialog = false },
-            title = { Text("Rename") },
+            title = { Text(stringResource(R.string.browser_dialog_rename_title)) },
             text = {
                 OutlinedTextField(
                     value = renameValue,
                     onValueChange = { renameValue = it },
-                    label = { Text("New name") },
+                    label = { Text(stringResource(R.string.browser_dialog_rename_label)) },
                     singleLine = true,
                     textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace)
                 )
@@ -587,10 +589,10 @@ fun BrowserScreen(
                 TextButton(onClick = {
                     if (renameValue.isNotBlank()) vm.renameFile(contextEntry!!, renameValue)
                     showRenameDialog = false; contextEntry = null
-                }) { Text("Rename") }
+                }) { Text(stringResource(R.string.browser_ctx_rename)) }
             },
             dismissButton = {
-                TextButton(onClick = { showRenameDialog = false }) { Text("Cancel") }
+                TextButton(onClick = { showRenameDialog = false }) { Text(stringResource(R.string.browser_dialog_cancel)) }
             }
         )
     }
@@ -599,8 +601,8 @@ fun BrowserScreen(
     if (showDeleteConfirm && contextEntry != null) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
-            title = { Text("Delete") },
-            text = { Text("Delete \"${contextEntry!!.name}\"? This cannot be undone.") },
+            title = { Text(stringResource(R.string.browser_ctx_delete)) },
+            text = { Text(stringResource(R.string.browser_dialog_delete_message, contextEntry!!.name)) },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -609,10 +611,10 @@ fun BrowserScreen(
                         contextEntry = null
                     },
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                ) { Text("Delete") }
+                ) { Text(stringResource(R.string.browser_ctx_delete)) }
             },
             dismissButton = {
-                TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
+                TextButton(onClick = { showDeleteConfirm = false }) { Text(stringResource(R.string.browser_dialog_cancel)) }
             }
         )
     }
@@ -621,12 +623,12 @@ fun BrowserScreen(
     if (showNewDialog) {
         AlertDialog(
             onDismissRequest = { showNewDialog = false; newFileName = "" },
-            title = { Text("New document") },
+            title = { Text(stringResource(R.string.browser_dialog_new_file_title)) },
             text = {
                 OutlinedTextField(
                     value = newFileName,
                     onValueChange = { newFileName = it },
-                    label = { Text("File name") },
+                    label = { Text(stringResource(R.string.browser_dialog_new_file_label)) },
                     singleLine = true,
                     textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace)
                 )
@@ -635,11 +637,11 @@ fun BrowserScreen(
                 TextButton(onClick = {
                     if (newFileName.isNotBlank()) vm.createFile(newFileName)
                     showNewDialog = false; newFileName = ""
-                }) { Text("Create") }
+                }) { Text(stringResource(R.string.browser_dialog_create)) }
             },
             dismissButton = {
                 TextButton(onClick = { showNewDialog = false; newFileName = "" }) {
-                    Text("Cancel")
+                    Text(stringResource(R.string.browser_dialog_cancel))
                 }
             }
         )
@@ -679,7 +681,7 @@ private fun EmptyDocsRow() {
         contentAlignment = Alignment.CenterStart
     ) {
         Text(
-            "No documents yet. Tap + to create one.",
+            stringResource(R.string.browser_empty_docs),
             fontFamily = FontFamily.Monospace,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -745,7 +747,7 @@ private fun DocListItem(
         ) {
             Icon(
                 Icons.Default.Star,
-                contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
+                contentDescription = if (isFavorite) stringResource(R.string.browser_ctx_remove_favorite) else stringResource(R.string.browser_ctx_add_favorite),
                 tint = if (isFavorite) MaterialTheme.colorScheme.primary
                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
                 modifier = Modifier.size(20.dp)

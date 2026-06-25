@@ -94,7 +94,20 @@ android {
 
     kotlinOptions { jvmTarget = "17" }
 
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
+
+    flavorDimensions += "tier"
+    productFlavors {
+        create("free") {
+            dimension = "tier"
+            applicationIdSuffix = ".free"
+            buildConfigField("boolean", "FULL_VERSION", "false")
+        }
+        create("full") {
+            dimension = "tier"
+            buildConfigField("boolean", "FULL_VERSION", "true")
+        }
+    }
 }
 
 dependencies {

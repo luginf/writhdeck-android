@@ -88,6 +88,7 @@ data class AppConfig(
     val fontFamily: String = "monospace",
     val fontBold: Boolean = false,
     val blockCursor: Boolean = false,
+    val cursorBlink: Boolean = false,
     val autosaveEnabled: Boolean = true,
     val autosaveInterval: Int = 1,
     val statusLeft: String = "ws filename dirty",
@@ -103,7 +104,10 @@ data class AppConfig(
     // "system" = let the spell checker service pick its own language (matches the
     // active keyboard/locale); otherwise an explicit BCP-47 tag (e.g. "en-US", "fr-FR")
     // from one of the spell checker's enabled subtypes.
-    val spellCheckLanguage: String = "system"
+    val spellCheckLanguage: String = "system",
+    // "system" = follow the device locale; otherwise forces the app UI to a specific
+    // language regardless of the device's locale ("en", "fr", "es", ...).
+    val appLanguage: String = "system"
 ) {
     /** True if [filename] passes [browserFilter] (or [browserShowAll] bypasses it).
      *  Mirrors the Tcl desktop's `list-docs` filtering: an empty filter or
@@ -399,6 +403,7 @@ object IniParser {
             },
             fontBold         = bool("font_bold", false),
             blockCursor      = bool("block_cursor", false),
+            cursorBlink      = bool("cursor_blink", false),
             autosaveEnabled  = bool("autosave_enabled", true),
             autosaveInterval = int("autosave_interval", 1).coerceAtLeast(1),
             statusLeft       = str("status_left",   "ws filename dirty"),
@@ -412,7 +417,8 @@ object IniParser {
             browserShowAll   = bool("browser_show_all", false),
             browserSubdirs   = bool("browser_subdirs", true),
             spellCheckEnabled = bool("spell_check", true),
-            spellCheckLanguage = str("spell_check_language", "system")
+            spellCheckLanguage = str("spell_check_language", "system"),
+            appLanguage = str("app_language", "system")
         )
     }
 
@@ -459,6 +465,10 @@ object IniParser {
             appendLine("docs_dir = ${config.docsCustomDir}")
             appendLine("spell_check = ${bool(config.spellCheckEnabled)}")
             appendLine("spell_check_language = ${config.spellCheckLanguage}")
+            appendLine("% app_language: forces the app UI to a specific language (\"system\", \"en\", \"fr\", \"es\")")
+            appendLine("app_language = ${config.appLanguage}")
+            appendLine("% cursor_blink: blink the editor caret (block or thin)")
+            appendLine("cursor_blink = ${bool(config.cursorBlink)}")
             appendLine()
             appendLine("= Keys =")
             appendLine("[keys]")
