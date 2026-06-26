@@ -1693,6 +1693,10 @@ fun EditorScreen(vm: WrithdeckViewModel, onBack: () -> Unit, onNavigateSettings:
                             event.isAltPressed && keyCode == AKeyEvent.KEYCODE_M -> {
                                 showMenu = true; true
                             }
+                            // Alt+D — toggle distraction-free mode
+                            event.isAltPressed && keyCode == AKeyEvent.KEYCODE_D -> {
+                                distractionFree = !distractionFree; true
+                            }
                             !ctrl && keyCode == AKeyEvent.KEYCODE_ESCAPE && showFind -> {
                                 showFind = false; findQuery = ""; findReplace = false; true
                             }
